@@ -20,10 +20,15 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+from typing import Optional
+
+import numpy as np
 import torch
 from torchmetrics import Metric
 
+from pyannote.audio.utils.metric import iterate_on_sfw
 from pyannote.audio.utils.permutation import permutate
+from pyannote.core import Annotation, SlidingWindowFeature, Timeline
 
 
 class DiscreteDiarizationErrorRate(Metric):
@@ -68,6 +73,47 @@ class DiscreteDiarizationErrorRate(Metric):
         self.missed_detection += torch.sum(missed_detection)
         self.confusion += torch.sum(confusion)
         self.total += 1.0 * torch.sum(target)
+
+    def update_from_sfw(
+        self,
+        reference: Annotation,
+        hypothesis: SlidingWindowFeature,
+        uem: Optional[Timeline] = None,
+    ):
+        def processing_fn(hypothesis, reference):
+            # Prepare data
+            ref_num_frames, ref_num_speakers = reference.shape
+
+            if hypothesis.ndim != 2:
+                raise NotImplementedError(
+                    "Only (num_frames, num_speakers)-shaped hypothesis is supported."
+                )
+
+            hyp_num_frames, hyp_num_speakers = hypothesis.shape
+
+            if ref_num_frames != hyp_num_frames:
+                raise ValueError(
+                    "reference and hypothesis must have the same number of frames."
+                )
+
+            if hyp_num_speakers > ref_num_speakers:
+                reference = np.pad(
+                    reference, ((0, 0), (0, hyp_num_speakers - ref_num_speakers))
+                )
+            elif ref_num_speakers > hyp_num_speakers:
+                hypothesis = np.pad(
+                    hypothesis, ((0, 0), (0, ref_num_speakers - hyp_num_speakers))
+                )
+
+            self.update(
+                torch.tensor(hypothesis)[None, :, :],
+                torch.tensor(reference)[None, :, :],
+            )
+
+        for _ in iterate_on_sfw(
+            processing_fn, hypothesis=hypothesis, reference=reference, uem=uem
+        ):
+            pass
 
     def compute(self):
         return (self.false_alarm + self.missed_detection + self.confusion) / self.total

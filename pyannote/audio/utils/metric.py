@@ -95,6 +95,64 @@ def discrete_diarization_error_rate(reference: np.ndarray, hypothesis: np.ndarra
     )
 
 
+def iterate_on_sfw(
+    processing_fn,
+    hypothesis: SlidingWindowFeature,
+    reference: Annotation,
+    uem: Optional[Timeline] = None,
+):
+    ndim = hypothesis.data.ndim
+    if ndim < 2 or ndim > 3:
+        raise NotImplementedError(
+            "Only (num_frames, num_speakers) or (num_chunks, num_frames, num_speakers)-shaped "
+            "hypothesis is supported."
+        )
+
+    # use hypothesis support and resolution when provided as (num_frames, num_speakers)
+    if ndim == 2:
+        support = hypothesis.extent
+        resolution = hypothesis.sliding_window
+
+    # use hypothesis support and estimate resolution when provided as (num_chunks, num_frames, num_speakers)
+    elif ndim == 3:
+        chunks = hypothesis.sliding_window
+        num_chunks, num_frames, _ = hypothesis.data.shape
+        support = Segment(chunks[0].start, chunks[num_chunks - 1].end)
+        resolution = chunks.duration / num_frames
+
+    # discretize reference annotation
+    reference = reference.discretize(support, resolution=resolution)
+
+    # if (num_frames, num_speakers)-shaped, compute just one DER for the whole file
+    if ndim == 2:
+        if uem is None:
+            yield processing_fn(hypothesis.data, reference.data)
+
+        if not Timeline([support]).covers(uem):
+            raise ValueError("`uem` must fully cover hypothesis extent.")
+
+        for segment in uem:
+            h = hypothesis.crop(segment)
+            r = reference.crop(segment)
+            yield processing_fn(h, r)
+    # if (num_chunks, num_frames, num_speakers)-shaed, compute one DER per chunk and aggregate
+    elif ndim == 3:
+        for window, hypothesis_window in hypothesis:
+
+            # Skip any window not fully covered by a segment of the uem
+            if uem is not None and not uem.covers(Timeline([window])):
+                continue
+
+            reference_window = reference.crop(window, mode="center")
+
+            common_num_frames = min(num_frames, reference_window.shape[0])
+
+            yield processing_fn(
+                hypothesis_window[:common_num_frames],
+                reference_window[:common_num_frames],
+            )
+
+
 class DiscreteDiarizationErrorRate(BaseMetric):
     """Compute diarization error rate on discretized annotations"""
 
@@ -171,70 +229,18 @@ class DiscreteDiarizationErrorRate(BaseMetric):
         reference: Annotation,
         uem: Optional[Timeline] = None,
     ):
+        components = self.init_components()
 
-        ndim = hypothesis.data.ndim
-        if ndim < 2 or ndim > 3:
-            raise NotImplementedError(
-                "Only (num_frames, num_speakers) or (num_chunks, num_frames, num_speakers)-shaped "
-                "hypothesis is supported."
-            )
+        def processing_fn(hyp, ref):
+            self.compute_components_helper(hyp, ref)
 
-        # use hypothesis support and resolution when provided as (num_frames, num_speakers)
-        if ndim == 2:
-            support = hypothesis.extent
-            resolution = hypothesis.sliding_window
+        for result in iterate_on_sfw(
+            processing_fn, hypothesis=hypothesis, reference=reference, uem=uem
+        ):
+            for name in components:
+                components[name] += result[name]
 
-        # use hypothesis support and estimate resolution when provided as (num_chunks, num_frames, num_speakers)
-        elif ndim == 3:
-            chunks = hypothesis.sliding_window
-            num_chunks, num_frames, _ = hypothesis.data.shape
-            support = Segment(chunks[0].start, chunks[num_chunks - 1].end)
-            resolution = chunks.duration / num_frames
-
-        # discretize reference annotation
-        reference = reference.discretize(support, resolution=resolution)
-
-        # if (num_frames, num_speakers)-shaped, compute just one DER for the whole file
-        if ndim == 2:
-
-            if uem is None:
-                return self.compute_components_helper(hypothesis.data, reference.data)
-
-            if not Timeline([support]).covers(uem):
-                raise ValueError("`uem` must fully cover hypothesis extent.")
-            
-            components = self.init_components()
-            for segment in uem:
-                h = hypothesis.crop(segment)
-                r = reference.crop(segment)
-                segment_component = self.compute_components_helper(h, r)
-                for name in self.components_:
-                    components[name] += segment_component[name]
-            return components
-
-        # if (num_chunks, num_frames, num_speakers)-shaed, compute one DER per chunk and aggregate
-        elif ndim == 3:
-
-            components = self.init_components()
-            for window, hypothesis_window in hypothesis:
-
-                # Skip any window not fully covered by a segment of the uem
-                if uem is not None and not uem.covers(Timeline([window])):
-                    continue
-
-                reference_window = reference.crop(window, mode="center")
-
-                common_num_frames = min(num_frames, reference_window.shape[0])
-
-                window_components = self.compute_components_helper(
-                    hypothesis_window[:common_num_frames],
-                    reference_window[:common_num_frames],
-                )
-
-                for name in self.components_:
-                    components[name] += window_components[name]
-
-            return components
+        return components
 
     def compute_metric(self, components):
         return (
