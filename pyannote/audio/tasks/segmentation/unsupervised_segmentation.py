@@ -499,75 +499,161 @@ class TeacherUpdate(Callback):
     def __init__(
         self,
         when: Literal["epoch", "batch"] = "epoch",
-        update_interval: int = 1,
-        weight_update_rate: float = 0.0,
         average_of: int = 1,
+        update_interval: Union[int, List[int]] = 1,
+        weight_update_rate: Union[float, List[float]] = 0.0,
     ):
+        """TeacherUpdate callback.
+        Allows to update the teacher model of a Task by using the average weights from a list or queue of teachers (see update_interval).
+        Also allows exponential moving average with the 'weight_update_rate' parameter.
+
+        If update_interval is a list or a string, will act either as a fixed size list where elements get updated at different rates, or as a queue of maximum size 'average_of'.
+
+        Parameters
+        ----------
+        when : Literal['epoch', 'batch'], optional
+            When the update is applied, by default 'epoch'
+        average_of : int, optional
+            How , by default 1
+        update_interval : Union[int, List[int]], optional
+            How frequently the teacher(s) are updated.
+            Also determines if the callback will use a queue of teachers, or a fixed list of teachers.
+            int parameter means it will be updated every update_interval, and new teacher weights will be added to a queue of max size average_of.
+            List[int] parameter must of the size 'average_of', and indicates the individual update_interval of each teacher weights, by default 1
+        weight_update_rate : Union[float, List[float]], optional
+            How much of the old weights to keep: 0.0 means instant update, 1.0 means never update.
+            float parameter means the same update rate for every case.
+            List[float] parameter is only allowed if we use a fixed list of teacher weights (=update_interval is also a list).
+            By default 0.0
+        """
+
+        if isinstance(update_interval, list):
+            if len(update_interval) != average_of:
+                raise ValueError(
+                    "If update_interval is a list, it should be of size average_of"
+                )
+        if isinstance(weight_update_rate, list):
+            if isinstance(update_interval, int):
+                raise ValueError(
+                    "The update must be in 'fixed list' mode for weight_update_rate to be a list (set update_interal to be a list to do so)"
+                )
+            if len(weight_update_rate) != average_of:
+                raise ValueError(
+                    "If weight_update_rate is a list, it should be of size average_of"
+                )
+
         self.when = when
         self.update_interval = update_interval
         self.weight_update_rate = weight_update_rate
         self.average_of = average_of
 
-        self.last_weights: List[OrderedDict[str, torch.Tensor]] = []
-        self.teacher_weights_cache: OrderedDict[str, torch.Tensor] = None
+        # The weights of the team of teachers that will be averaged
+        self.team_weights: List[OrderedDict[str, torch.Tensor]] = []
+        # The "real" teacher weights to be used by the task.
+        self.cache: OrderedDict[str, torch.Tensor] = None
 
-    def enqueue_teacher(self, teacher: OrderedDict[str, torch.Tensor]):
-        self.last_weights.append(teacher)
-        if len(self.last_weights) >= self.average_of:
-            self.last_weights.pop(0)
+    def enqueue_to_team(self, teacher: OrderedDict[str, torch.Tensor]):
+        self.team_weights.append(teacher)
+        if len(self.team_weights) >= self.average_of:
+            self.team_weights.pop(0)
 
-    def get_updated_weights(
+    def get_decayed_weights(
         self,
         teacher_w: OrderedDict[str, torch.Tensor],
         student_w: OrderedDict[str, torch.Tensor],
+        tau: float,
     ):
         with torch.no_grad():
             return {
-                k: teacher_w[k].to("cpu") * self.weight_update_rate
-                + student_w[k].to("cpu") * (1 - self.weight_update_rate)
+                k: teacher_w[k].to("cpu") * tau + student_w[k].to("cpu") * (1 - tau)
                 for k in student_w
             }
 
     def compute_teacher_weights(self) -> OrderedDict[str, torch.Tensor]:
-        if len(self.last_weights) == 1:
-            return self.last_weights[0]
+        if len(self.team_weights) == 1:
+            return self.team_weights[0]
         else:
             with torch.no_grad():
                 new_w = {
-                    k: torch.mean(torch.stack([w[k] for w in self.last_weights]), dim=0)
-                    for k in self.last_weights[0]
+                    k: torch.mean(torch.stack([w[k] for w in self.team_weights]), dim=0)
+                    for k in self.team_weights[0]
                 }
                 return new_w
+
+    def get_update_rate(self, index: int = -1):
+        if index >= 0 and isinstance(self.weight_update_rate, list):
+            return self.weight_update_rate[index]
+        else:
+            return self.weight_update_rate
+
+    def try_update_team_queue(self, progress: int, model: pl.LightningModule) -> bool:
+        if progress % self.update_interval != 0:
+            return False
+
+        # Get new teacher "candidate" (from decayed weights) and enqueue it in the teacher history
+        teacher_candidate_w = self.get_decayed_weights(
+            teacher_w=self.cache,
+            student_w=model.state_dict(),
+            tau=self.get_update_rate(),
+        )
+        self.enqueue_to_team(teacher_candidate_w)
+        return True
+
+    def try_update_team_list(self, progress: int, model: pl.LightningModule) -> bool:
+        cache_dirty = False
+        # Check for each team "member" if it needs to be updated
+        for i in range(len(self.update_interval)):
+            interval = self.update_interval[i]
+            if interval == 0 or progress % interval != 0:
+                continue
+
+            new_teacher_i_w = self.get_decayed_weights(
+                teacher_w=self.team_weights[i],
+                student_w=model.state_dict(),
+                tau=self.get_update_rate(),
+            )
+            self.team_weights[i] = new_teacher_i_w
+            cache_dirty = True
+        return cache_dirty
 
     def try_update_teacher(
         self, progress: int, trainer: pl.Trainer, model: pl.LightningModule
     ):
-        if (
-            self.update_interval > 0
-            and self.weight_update_rate < 1.0
-            and progress % self.update_interval == 0
-        ):
+        if self.update_interval == 0 or self.weight_update_rate >= 1.0:
+            return
+
+        # will indicate if teacher cache needs to be updated
+        cache_dirty = False
+
+        # If we periodically update a queue...
+        if isinstance(self.update_interval, int):
+            cache_dirty = self.try_update_team_queue(progress, model)
+        # If we update the different elements of a list at a different rate ...
+        elif isinstance(self.update_interval, list):
+            cache_dirty = self.try_update_team_list(progress, model)
+
+        # If a weight has changed, compute updated teacher weights, cache it, and assign it
+        if cache_dirty:
             try:
-                # Get new teacher "candidate" (from decayed weights) and enqueue it in the teacher history
-                teacher_candidate_w = self.get_updated_weights(
-                    self.teacher_weights_cache, model.state_dict()
-                )
-                self.enqueue_teacher(teacher_candidate_w)
-
-                # Compute the real new teacher weights, cache it, and assign it
                 new_teacher_w = self.compute_teacher_weights()
-                self.teacher_weights_cache = new_teacher_w
+                self.cache = new_teacher_w
                 model.task.teacher.load_state_dict(new_teacher_w)
-
             except AttributeError as err:
                 print(f"TeacherUpdate callback can't be applied on this model : {err}")
 
     def on_train_start(
         self, trainer: pl.Trainer, pl_module: pl.LightningModule
     ) -> None:
-        if len(self.last_weights) == 0:
-            self.last_weights.append(pl_module.task.teacher.state_dict())
-            self.teacher_weights_cache = pl_module.task.teacher.state_dict()
+        # Initialize team_weights on the first train start
+        if len(self.team_weights) > 0:
+            return
+
+        initial_teacher_w = pl_module.task.teacher.state_dict()
+        if isinstance(self.update_interval, int):
+            self.team_weights.append(initial_teacher_w)
+        elif isinstance(self.update_interval, list):
+            self.team_weights = [initial_teacher_w] * len(self.update_interval)
+        self.cache = initial_teacher_w
 
     def on_train_batch_end(
         self,
