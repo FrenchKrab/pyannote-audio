@@ -21,6 +21,6 @@
 # SOFTWARE.
 
 
-from .mix import MixSpeakerDiarization
+from .mix import MixAugmentedSpeakerDiarization, MixSpeakerDiarization
 
-__all__ = ["MixSpeakerDiarization"]
+__all__ = ["MixSpeakerDiarization", "MixAugmentedSpeakerDiarization"]
