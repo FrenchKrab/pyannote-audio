@@ -514,7 +514,7 @@ class TeacherUpdate(Callback):
         when : Literal['epoch', 'batch'], optional
             When the update is applied, by default 'epoch'
         average_of : int, optional
-            How , by default 1
+            How many teachers to use, by default 1
         update_interval : Union[int, List[int]], optional
             How frequently the teacher(s) are updated.
             Also determines if the callback will use a queue of teachers, or a fixed list of teachers.
@@ -565,8 +565,8 @@ class TeacherUpdate(Callback):
     ):
         with torch.no_grad():
             return {
-                k: teacher_w[k].to("cpu") * tau + student_w[k].to("cpu") * (1 - tau)
-                for k in student_w
+                k: teacher_w[k] * tau + student_w[k].to(teacher_w[k].device) * (1 - tau)
+                for k in student_w.keys()
             }
 
     def compute_teacher_weights(self) -> OrderedDict[str, torch.Tensor]:
@@ -581,8 +581,13 @@ class TeacherUpdate(Callback):
                 return new_w
 
     def get_update_rate(self, index: int = -1):
-        if index >= 0 and isinstance(self.weight_update_rate, list):
-            return self.weight_update_rate[index]
+        if isinstance(self.weight_update_rate, list):
+            if index >= 0:
+                return self.weight_update_rate[index]
+            else:
+                raise ValueError(
+                    "get_update_rate must take an index value when self.weight_update_rate is a list"
+                )
         else:
             return self.weight_update_rate
 
@@ -610,7 +615,7 @@ class TeacherUpdate(Callback):
             new_teacher_i_w = self.get_decayed_weights(
                 teacher_w=self.team_weights[i],
                 student_w=model.state_dict(),
-                tau=self.get_update_rate(),
+                tau=self.get_update_rate(i),
             )
             self.team_weights[i] = new_teacher_i_w
             cache_dirty = True
@@ -619,7 +624,7 @@ class TeacherUpdate(Callback):
     def try_update_teacher(
         self, progress: int, trainer: pl.Trainer, model: pl.LightningModule
     ):
-        if self.update_interval == 0 or self.weight_update_rate >= 1.0:
+        if self.update_interval == 0:
             return
 
         # will indicate if teacher cache needs to be updated
