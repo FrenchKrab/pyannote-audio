@@ -509,12 +509,12 @@ class TeacherUpdate(Callback):
         super().__init__()
         self.initialized = False
 
+        self.when = when
         if self.when != "epoch" and self.when != "batch":
             raise ValueError(
                 "TeacherUpdate 'when' argument can only be 'epoch' or 'batch'"
             )
 
-        self.when = when
         # The "real" teacher weights to be used by the task.
         # TODO: determine if useless ?
         self.cache: OrderedDict[str, torch.Tensor] = None
@@ -523,14 +523,12 @@ class TeacherUpdate(Callback):
         self, progress: int, current_model: pl.LightningModule
     ) -> bool:
         """Called every time the teacher might need to be updated.
-
         Parameters
         ----------
         progress : int
             Describes how far we are in training (epoch number or batch number)
         current_model : pl.LightningModule
             Current model being trained.
-
         Returns
         -------
         bool
@@ -542,7 +540,6 @@ class TeacherUpdate(Callback):
 
     def _compute_teacher_weights(self) -> OrderedDict[str, torch.Tensor]:
         """Computes the new teacher weights from the internal state.
-
         Returns
         -------
         OrderedDict[str, torch.Tensor]
@@ -552,7 +549,6 @@ class TeacherUpdate(Callback):
 
     def _setup_initial(self, initial_model_w: OrderedDict[str, torch.Tensor]):
         """Called once before training. Useful to setup the initial internal state.
-
         Parameters
         ----------
         initial_model_w : OrderedDict[str, torch.Tensor]
