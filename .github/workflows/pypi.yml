@@ -3,7 +3,8 @@ name: PyPI
 on:
   push:
     tags:
-    - '*'
+     - ''
+#    - '*'
 
 jobs:
   deploy:
