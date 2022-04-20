@@ -496,66 +496,192 @@ class DiscardThresholdDer(PseudoLabelPostprocess):
 
 
 class TeacherUpdate(Callback):
+    def __init__(self, when: Literal["epoch", "batch"]) -> None:
+        """Abstract class for teacher update callback.
+        _teacher_update_state, _compute_teacher_weights and _setup_initial needs to be overriden.
+
+        Parameters
+        ----------
+        when : Literal['epoch', 'batch'], optional
+            When the update is applied.
+        """
+
+        super().__init__()
+        self.initialized = False
+
+        if self.when != "epoch" and self.when != "batch":
+            raise ValueError(
+                "TeacherUpdate 'when' argument can only be 'epoch' or 'batch'"
+            )
+
+        self.when = when
+        # The "real" teacher weights to be used by the task.
+        # TODO: determine if useless ?
+        self.cache: OrderedDict[str, torch.Tensor] = None
+
+    def _teacher_update_state(
+        self, progress: int, current_model: pl.LightningModule
+    ) -> bool:
+        """Called every time the teacher might need to be updated.
+
+        Parameters
+        ----------
+        progress : int
+            Describes how far we are in training (epoch number or batch number)
+        current_model : pl.LightningModule
+            Current model being trained.
+
+        Returns
+        -------
+        bool
+            Whether or not the internal state has been updated.
+            If true, the 'teacher' attribute of the model will be updated with
+            newly computed weights from _compute_teacher_weights.
+        """
+        raise NotImplementedError()
+
+    def _compute_teacher_weights(self) -> OrderedDict[str, torch.Tensor]:
+        """Computes the new teacher weights from the internal state.
+
+        Returns
+        -------
+        OrderedDict[str, torch.Tensor]
+            New teacher weights
+        """
+        raise NotImplementedError()
+
+    def _setup_initial(self, initial_model_w: OrderedDict[str, torch.Tensor]):
+        """Called once before training. Useful to setup the initial internal state.
+
+        Parameters
+        ----------
+        initial_model_w : OrderedDict[str, torch.Tensor]
+            Current (initial) model weights.
+        """
+        raise NotImplementedError()
+
+    def update_teacher_and_cache(
+        self, progress: int, trainer: pl.Trainer, model: pl.LightningModule
+    ):
+        # will indicate if teacher cache needs to be updated
+        cache_dirty = self._teacher_update_state(progress, model)
+
+        # If a weight has changed, compute updated teacher weights, cache it, and assign it
+        if cache_dirty:
+            try:
+                new_teacher_w = self._compute_teacher_weights()
+                self.cache = new_teacher_w
+                model.task.teacher.load_state_dict(new_teacher_w)
+            except AttributeError as err:
+                print(f"TeacherUpdate callback can't be applied on this model : {err}")
+
+    def on_train_batch_end(
+        self,
+        trainer: "pl.Trainer",
+        pl_module: "pl.LightningModule",
+        outputs: STEP_OUTPUT,
+        batch: Any,
+        batch_idx: int,
+        unused: Optional[int] = 0,
+    ) -> None:
+        if self.when == "batch":
+            self.update_teacher_and_cache(batch_idx, trainer, pl_module)
+
+    def on_train_epoch_end(
+        self, trainer: pl.Trainer, pl_module: pl.LightningModule
+    ) -> None:
+        if self.when == "epoch":
+            self.update_teacher_and_cache(trainer.current_epoch, trainer, pl_module)
+
+    def on_train_start(
+        self, trainer: pl.Trainer, pl_module: pl.LightningModule
+    ) -> None:
+        # Only initialize once
+        if self.initialized:
+            return
+        self.initialized = True
+
+        initial_teacher_w = pl_module.task.teacher.state_dict()
+        self._setup_initial(initial_teacher_w)
+        self.cache = initial_teacher_w
+
+    @staticmethod
+    def get_averaged_weights(
+        weights: List[OrderedDict[str, torch.Tensor]]
+    ) -> OrderedDict[str, torch.Tensor]:
+        return {
+            k: torch.mean(torch.stack([w[k] for w in weights]), dim=0)
+            for k in weights[0]
+        }
+
+
+class TeacherQueueUpdate(TeacherUpdate):
     def __init__(
         self,
         when: Literal["epoch", "batch"] = "epoch",
         average_of: int = 1,
-        update_interval: Union[int, List[int]] = 1,
-        weight_update_rate: Union[float, List[float]] = 0.0,
+        update_interval: int = 1,
     ):
-        """TeacherUpdate callback.
-        Allows to update the teacher model of a Task by using the average weights from a list or queue of teachers (see update_interval).
-        Also allows exponential moving average with the 'weight_update_rate' parameter.
+        super().__init__(when=when)
 
-        If update_interval is a list or a string, will act either as a fixed size list where elements get updated at different rates, or as a queue of maximum size 'average_of'.
+        self.average_of = average_of
+        self.update_interval = update_interval
+        self.weights_queue: List[OrderedDict[str, torch.Tensor]] = None
+        pass
+
+    def _setup_initial(self, initial_model_w: OrderedDict[str, torch.Tensor]):
+        self.weights_queue = []
+
+    def _compute_teacher_weights(self) -> OrderedDict[str, torch.Tensor]:
+        return TeacherUpdate.get_averaged_weights(self.weights_queue)
+
+    def _teacher_update_state(self, progress: int, model: pl.LightningModule) -> bool:
+        if progress % self.update_interval != 0:
+            return False
+
+        # Get new teacher "candidate" (from decayed weights) and enqueue it in the teacher history
+        teacher_candidate_w = model.state_dict()
+        self.enqueue_to_team(teacher_candidate_w)
+        return True
+
+    def enqueue_to_team(self, teacher: OrderedDict[str, torch.Tensor]):
+        self.weights_queue.append(teacher)
+        if len(self.weights_queue) > self.average_of:
+            self.weights_queue.pop(0)
+
+
+class TeacherTeamUpdate(TeacherUpdate):
+    def __init__(
+        self,
+        when: Literal["epoch", "batch"],
+        update_interval: List[int],
+        weight_update_rate: List[float],
+    ):
+        """TeacherTeamUpdate callback.
+        Keeps in memory a "team" of teachers weights that gets updated at different interval and at a different rate (EMA).
+        The final teacher is the average of all these weights.
 
         Parameters
         ----------
         when : Literal['epoch', 'batch'], optional
             When the update is applied, by default 'epoch'
-        average_of : int, optional
-            How many teachers to use, by default 1
-        update_interval : Union[int, List[int]], optional
+        update_interval : List[int]
             How frequently the teacher(s) are updated.
-            Also determines if the callback will use a queue of teachers, or a fixed list of teachers.
-            int parameter means it will be updated every update_interval, and new teacher weights will be added to a queue of max size average_of.
-            List[int] parameter must of the size 'average_of', and indicates the individual update_interval of each teacher weights, by default 1
-        weight_update_rate : Union[float, List[float]], optional
+        weight_update_rate : List[float]
             How much of the old weights to keep: 0.0 means instant update, 1.0 means never update.
-            float parameter means the same update rate for every case.
-            List[float] parameter is only allowed if we use a fixed list of teacher weights (=update_interval is also a list).
-            By default 0.0
         """
+        super().__init__(when=when)
 
-        if isinstance(update_interval, list):
-            if len(update_interval) != average_of:
-                raise ValueError(
-                    "If update_interval is a list, it should be of size average_of"
-                )
-        if isinstance(weight_update_rate, list):
-            if isinstance(update_interval, int):
-                raise ValueError(
-                    "The update must be in 'fixed list' mode for weight_update_rate to be a list (set update_interal to be a list to do so)"
-                )
-            if len(weight_update_rate) != average_of:
-                raise ValueError(
-                    "If weight_update_rate is a list, it should be of size average_of"
-                )
+        if len(update_interval) != len(weight_update_rate):
+            raise ValueError(
+                "update_interval should be the same size as weight_update_rate"
+            )
 
-        self.when = when
         self.update_interval = update_interval
         self.weight_update_rate = weight_update_rate
-        self.average_of = average_of
 
         # The weights of the team of teachers that will be averaged
         self.team_weights: List[OrderedDict[str, torch.Tensor]] = []
-        # The "real" teacher weights to be used by the task.
-        self.cache: OrderedDict[str, torch.Tensor] = None
-
-    def enqueue_to_team(self, teacher: OrderedDict[str, torch.Tensor]):
-        self.team_weights.append(teacher)
-        if len(self.team_weights) >= self.average_of:
-            self.team_weights.pop(0)
 
     def get_decayed_weights(
         self,
@@ -569,48 +695,24 @@ class TeacherUpdate(Callback):
                 for k in student_w.keys()
             }
 
-    def compute_teacher_weights(self) -> OrderedDict[str, torch.Tensor]:
-        if len(self.team_weights) == 1:
-            return self.team_weights[0]
-        else:
-            with torch.no_grad():
-                new_w = {
-                    k: torch.mean(torch.stack([w[k] for w in self.team_weights]), dim=0)
-                    for k in self.team_weights[0]
-                }
-                return new_w
+    def get_update_rate(self, index) -> float:
+        return self.weight_update_rate[index]
 
-    def get_update_rate(self, index: int = -1):
-        if isinstance(self.weight_update_rate, list):
-            if index >= 0:
-                return self.weight_update_rate[index]
-            else:
-                raise ValueError(
-                    "get_update_rate must take an index value when self.weight_update_rate is a list"
-                )
-        else:
-            return self.weight_update_rate
+    def _setup_initial(self, initial_model_w: OrderedDict[str, torch.Tensor]):
+        self.team_weights = [initial_model_w] * len(self.update_interval)
 
-    def try_update_team_queue(self, progress: int, model: pl.LightningModule) -> bool:
-        if progress % self.update_interval != 0:
-            return False
+    def _compute_teacher_weights(self) -> OrderedDict[str, torch.Tensor]:
+        return TeacherUpdate.get_averaged_weights(self.team_weights)
 
-        # Get new teacher "candidate" (from decayed weights) and enqueue it in the teacher history
-        teacher_candidate_w = self.get_decayed_weights(
-            teacher_w=self.cache,
-            student_w=model.state_dict(),
-            tau=self.get_update_rate(),
-        )
-        self.enqueue_to_team(teacher_candidate_w)
-        return True
-
-    def try_update_team_list(self, progress: int, model: pl.LightningModule) -> bool:
+    def _teacher_update_state(self, progress: int, model: pl.LightningModule) -> bool:
         cache_dirty = False
-        # Check for each team "member" if it needs to be updated
+        # Check for each member of the ensemble if it needs to be updated
         for i in range(len(self.update_interval)):
             interval = self.update_interval[i]
             if interval == 0 or progress % interval != 0:
+                print(f"NOT updated teacher {i}")
                 continue
+            print(f"updating teacher {i}")
 
             new_teacher_i_w = self.get_decayed_weights(
                 teacher_w=self.team_weights[i],
@@ -620,60 +722,3 @@ class TeacherUpdate(Callback):
             self.team_weights[i] = new_teacher_i_w
             cache_dirty = True
         return cache_dirty
-
-    def try_update_teacher(
-        self, progress: int, trainer: pl.Trainer, model: pl.LightningModule
-    ):
-        if self.update_interval == 0:
-            return
-
-        # will indicate if teacher cache needs to be updated
-        cache_dirty = False
-
-        # If we periodically update a queue...
-        if isinstance(self.update_interval, int):
-            cache_dirty = self.try_update_team_queue(progress, model)
-        # If we update the different elements of a list at a different rate ...
-        elif isinstance(self.update_interval, list):
-            cache_dirty = self.try_update_team_list(progress, model)
-
-        # If a weight has changed, compute updated teacher weights, cache it, and assign it
-        if cache_dirty:
-            try:
-                new_teacher_w = self.compute_teacher_weights()
-                self.cache = new_teacher_w
-                model.task.teacher.load_state_dict(new_teacher_w)
-            except AttributeError as err:
-                print(f"TeacherUpdate callback can't be applied on this model : {err}")
-
-    def on_train_start(
-        self, trainer: pl.Trainer, pl_module: pl.LightningModule
-    ) -> None:
-        # Initialize team_weights on the first train start
-        if len(self.team_weights) > 0:
-            return
-
-        initial_teacher_w = pl_module.task.teacher.state_dict()
-        if isinstance(self.update_interval, int):
-            self.team_weights.append(initial_teacher_w)
-        elif isinstance(self.update_interval, list):
-            self.team_weights = [initial_teacher_w] * len(self.update_interval)
-        self.cache = initial_teacher_w
-
-    def on_train_batch_end(
-        self,
-        trainer: "pl.Trainer",
-        pl_module: "pl.LightningModule",
-        outputs: STEP_OUTPUT,
-        batch: Any,
-        batch_idx: int,
-        unused: Optional[int] = 0,
-    ) -> None:
-        if self.when == "batch":
-            self.try_update_teacher(batch_idx, trainer, pl_module)
-
-    def on_train_epoch_end(
-        self, trainer: pl.Trainer, pl_module: pl.LightningModule
-    ) -> None:
-        if self.when == "epoch":
-            self.try_update_teacher(trainer.current_epoch, trainer, pl_module)
