@@ -696,3 +696,94 @@ class TeacherTeamUpdate(TeacherUpdate):
             self.team_weights[i] = new_teacher_i_w
             cache_dirty = True
         return cache_dirty
+
+
+def get_decayed_weights(
+    teacher_w: OrderedDict[str, torch.Tensor],
+    student_w: OrderedDict[str, torch.Tensor],
+    tau: float,
+):
+    with torch.no_grad():
+        return {
+            k: teacher_w[k].to(student_w[k].device) * tau + student_w[k] * (1 - tau)
+            for k in student_w.keys()
+        }
+
+
+class AlmostMetaPseudoLabel(Callback):
+    def __init__(
+        self, teacher: Model, loss, strategy: Literal["ema"] = "ema", ema_speed=0.15
+    ) -> None:
+        super().__init__()
+        # params
+        self.teacher = teacher
+        self.loss_fn = loss
+        self.strategy = strategy
+        self.ema_speed = ema_speed
+
+        if strategy != "ema":
+            raise ValueError("strategy has to be one of : 'ema'")
+
+        # work variables
+        self.old_loss = None
+        self.x = None
+        self.targets = None
+
+    def on_train_batch_start(
+        self,
+        trainer: "pl.Trainer",
+        pl_module: "pl.LightningModule",
+        batch: Any,
+        batch_idx: int,
+        unused: Optional[int] = 0,
+    ) -> None:
+        labelled_data = next(iter(self.teacher.train_dataloader()))
+        self.x = labelled_data["X"].to(pl_module.device)
+        self.targets = labelled_data["y"].to(pl_module.device)
+        with torch.no_grad():
+            s_output = pl_module(self.x).detach()
+
+        s_output, _ = permutate(self.targets, s_output)
+        self.old_loss = pl_module.task.segmentation_loss(
+            s_output.detach(), self.targets
+        )
+
+        return super().on_train_batch_start(
+            trainer, pl_module, batch, batch_idx, unused
+        )
+
+    def on_train_batch_end(
+        self,
+        trainer: "pl.Trainer",
+        pl_module: "pl.LightningModule",
+        outputs: STEP_OUTPUT,
+        batch: Any,
+        batch_idx: int,
+        unused: Optional[int] = 0,
+    ) -> None:
+        with torch.no_grad():
+            s_output = pl_module(self.x).detach()
+        s_output, _ = permutate(self.targets, s_output)
+        new_loss = pl_module.task.segmentation_loss(s_output.detach(), self.targets)
+
+        # compute the "h" factor of the mpl algorithm
+        h = new_loss - self.old_loss
+
+        if self.strategy == "ema":
+            # low h -> lower tau, h >=0 -> tau=1
+            tau = torch.min(
+                torch.exp(h) * self.ema_speed + (1 - self.ema_speed),
+                torch.ones_like(h) * 1.0,
+            )
+            new_teacher_w = get_decayed_weights(
+                teacher_w=self.teacher.state_dict(),
+                student_w=pl_module.state_dict(),
+                tau=tau,
+            )
+            self.teacher.load_state_dict(new_teacher_w)
+
+        # print(f"h={h}  ->  tau={tau}")
+
+        return super().on_train_batch_end(
+            trainer, pl_module, outputs, batch, batch_idx, unused
+        )
