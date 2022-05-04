@@ -185,6 +185,7 @@ class UnsupervisedSegmentation(Segmentation, Task):
         if self.use_pseudolabels("train"):
             x = collated_X
             # compute pseudo labels
+            self.teacher.train(False)
             pseudo_y, computed_ys = self.get_teacher_outputs(
                 x=x, aug=self.augmentation_model, fw_passes=self.pl_fw_passes
             )
@@ -712,20 +713,20 @@ def get_decayed_weights(
 
 class AlmostMetaPseudoLabel(Callback):
     def __init__(
-        self, teacher: Model, loss, strategy: Literal["ema"] = "ema", ema_speed=0.15
+        self,
+        teacher: Model,
+        optimizer: torch.optim.Optimizer,
+        uda_augment: BaseWaveformTransform,
     ) -> None:
         super().__init__()
         # params
         self.teacher = teacher
-        self.loss_fn = loss
-        self.strategy = strategy
-        self.ema_speed = ema_speed
-
-        if strategy != "ema":
-            raise ValueError("strategy has to be one of : 'ema'")
+        self.u_dataloader_iter = iter(self.teacher.train_dataloader())
+        self.uda_augment = uda_augment
+        self.optimizer = optimizer
 
         # work variables
-        self.old_loss = None
+        self.old_s_loss_l = None
         self.x = None
         self.targets = None
 
@@ -737,20 +738,21 @@ class AlmostMetaPseudoLabel(Callback):
         batch_idx: int,
         unused: Optional[int] = 0,
     ) -> None:
-        labelled_data = next(iter(self.teacher.train_dataloader()))
+        pl_module_previous_mode = pl_module.training
+        pl_module.eval()
+
+        labelled_data = next(self.u_dataloader_iter)
         self.x = labelled_data["X"].to(pl_module.device)
         self.targets = labelled_data["y"].to(pl_module.device)
         with torch.no_grad():
             s_output = pl_module(self.x).detach()
 
         s_output, _ = permutate(self.targets, s_output)
-        self.old_loss = pl_module.task.segmentation_loss(
+        self.old_s_loss_l = pl_module.task.segmentation_loss(
             s_output.detach(), self.targets
         )
 
-        return super().on_train_batch_start(
-            trainer, pl_module, batch, batch_idx, unused
-        )
+        pl_module.train(pl_module_previous_mode)
 
     def on_train_batch_end(
         self,
@@ -761,29 +763,44 @@ class AlmostMetaPseudoLabel(Callback):
         batch_idx: int,
         unused: Optional[int] = 0,
     ) -> None:
+        self.teacher.train()
+        xu = batch["X"]
+
         with torch.no_grad():
-            s_output = pl_module(self.x).detach()
-        s_output, _ = permutate(self.targets, s_output)
-        new_loss = pl_module.task.segmentation_loss(s_output.detach(), self.targets)
+            # Compute output of student on labelled data
+            s_output_l = pl_module(self.x).detach()
+        # Compute output of teacher on labelled data
+        t_output_l = self.teacher(self.x.to(self.teacher.device))
+        # Compute output on augmented unlabelled data
+        xu_aug = self.uda_augment(xu, sample_rate=pl_module.hparams.sample_rate).samples
+        t_output_ua = self.teacher(xu_aug.to(self.teacher.device))
+        # Compute output on unlabelled data
+        t_output_u = self.teacher(xu.to(self.teacher.device))
+        hard_pseudo_labels = (t_output_u.detach() > 0.5).float()
 
         # compute the "h" factor of the mpl algorithm
-        h = new_loss - self.old_loss
+        new_s_loss_l = self.ampl_loss(s_output_l, self.targets, pl_module)
+        h = new_s_loss_l - self.old_s_loss_l
 
-        if self.strategy == "ema":
-            # low h -> lower tau, h >=0 -> tau=1
-            tau = torch.min(
-                torch.exp(h) * self.ema_speed + (1 - self.ema_speed),
-                torch.ones_like(h) * 1.0,
-            )
-            new_teacher_w = get_decayed_weights(
-                teacher_w=self.teacher.state_dict(),
-                student_w=pl_module.state_dict(),
-                tau=tau,
-            )
-            self.teacher.load_state_dict(new_teacher_w)
-
-        # print(f"h={h}  ->  tau={tau}")
-
-        return super().on_train_batch_end(
-            trainer, pl_module, outputs, batch, batch_idx, unused
+        t_loss_student_fb = h * self.ampl_loss(
+            t_output_u, hard_pseudo_labels, pl_module
         )
+        t_loss_l = self.ampl_loss(
+            t_output_l, self.targets.to(t_output_l.device), pl_module
+        )
+        t_loss_uda = self.ampl_loss(
+            t_output_ua, (t_output_l.detach() > 0.5).float(), pl_module
+        )
+
+        self.optimizer.zero_grad()
+        t_loss = t_loss_student_fb + t_loss_l + t_loss_uda
+        t_loss.backward()
+        self.optimizer.step()
+
+        self.old_s_loss_l = None
+        self.x = None
+        self.targets = None
+
+    def ampl_loss(self, preds, targets, pl_module):
+        permutated_preds, _ = permutate(targets, preds)
+        return pl_module.task.segmentation_loss(permutated_preds, targets)
