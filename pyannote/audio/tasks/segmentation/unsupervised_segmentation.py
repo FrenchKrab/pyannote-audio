@@ -437,6 +437,38 @@ class DiscardConfidence(PseudoLabelPostprocess):
         return pseudo_y[filter], x[filter]
 
 
+class DiscardDiarizationConfidence(PseudoLabelPostprocess):
+    """Experimental Diarization confidence. 0.0=max confidence, 1.0=worst confidence.
+
+    Parameters
+    ----------
+    PseudoLabelPostprocess : _type_
+        _description_
+    """
+
+    # TODO : figure out thresholds when using slopes/dx
+
+    def __init__(self, threshold) -> None:
+        super().__init__()
+        self.threshold = threshold
+
+    def process(
+        self, pseudo_y: torch.Tensor, y: torch.Tensor, x: torch.Tensor, ys: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        slope = pseudo_y[:, 1:, :] - pseudo_y[:, :-1, :]
+        interframes = (pseudo_y[:, 1:, :] + pseudo_y[:, :-1, :]) / 2
+
+        per_speaker_score = torch.mean(
+            torch.cos(interframes * torch.pi - 0.5 * torch.pi)
+            * torch.exp(-4 * torch.abs(slope)),
+            dim=1,
+        )
+        per_batch_score, _ = torch.max(per_speaker_score, dim=-1)
+
+        filter = per_batch_score < self.threshold
+        return pseudo_y[filter], x[filter]
+
+
 class DiscardPercentDer(PseudoLabelPostprocess):
     def __init__(self, ratio_to_discard: float = 0.1) -> None:
         self.ratio_to_discard = ratio_to_discard
