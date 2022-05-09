@@ -455,8 +455,11 @@ class DiscardDiarizationConfidence(PseudoLabelPostprocess):
     def process(
         self, pseudo_y: torch.Tensor, y: torch.Tensor, x: torch.Tensor, ys: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        slope = pseudo_y[:, 1:, :] - pseudo_y[:, :-1, :]
-        interframes = (pseudo_y[:, 1:, :] + pseudo_y[:, :-1, :]) / 2
+
+        soft_pseudo_y = torch.mean(ys, dim=0)
+
+        slope = soft_pseudo_y[:, 1:, :] - soft_pseudo_y[:, :-1, :]
+        interframes = (soft_pseudo_y[:, 1:, :] + soft_pseudo_y[:, :-1, :]) / 2
 
         per_speaker_score = torch.mean(
             torch.cos(interframes * torch.pi - 0.5 * torch.pi)
