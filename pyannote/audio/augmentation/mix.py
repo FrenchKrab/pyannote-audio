@@ -27,6 +27,8 @@ import torch
 from torch import Tensor
 from torch_audiomentations import Mix
 
+from pyannote.audio.pipelines.speaker_verification import PretrainedSpeakerEmbedding
+
 
 class MixSpeakerDiarization(Mix):
     """
@@ -141,3 +143,152 @@ class MixSpeakerDiarization(Mix):
             self.transform_parameters["sample_idx"][
                 samples_with_n_speakers
             ] = selected_candidates
+
+
+class UnsupervisedMixSpeakerDiarization(Mix):
+    """
+    Create a new sample by mixing it with the most different sample from the same batch.
+    Useful for unsupervised tasks.
+
+    Signal-to-noise ratio (where "noise" is the second random sample) is selected
+    randomly between `min_snr_in_db` and `max_snr_in_db`.
+
+    Parameters
+    ----------
+    min_snr_in_db : float, optional
+        Defaults to 0.0
+    max_snr_in_db : float, optional
+        Defaults to 5.0
+    max_num_speakers: int, optional
+        Maximum number of speakers in mixtures.  Defaults to actual maximum number
+        of speakers in each batch.
+    """
+
+    supported_modes = {"per_example", "per_channel"}
+
+    supports_multichannel = True
+    requires_sample_rate = False
+
+    supports_target = True
+    requires_target = True
+
+    def __init__(
+        self,
+        embedder: PretrainedSpeakerEmbedding,
+        min_snr_in_db: float = 0.0,
+        max_snr_in_db: float = 5.0,
+        mode: str = "per_example",
+        p: float = 0.5,
+        p_mode: str = None,
+        sample_rate: int = None,
+        target_rate: int = None,
+        max_num_speakers: int = None,
+        output_type: str = "tensor",
+    ):
+        super().__init__(
+            min_snr_in_db=min_snr_in_db,
+            max_snr_in_db=max_snr_in_db,
+            mode=mode,
+            p=p,
+            p_mode=p_mode,
+            sample_rate=sample_rate,
+            target_rate=target_rate,
+            output_type=output_type,
+        )
+        self.embedder = embedder
+        self.max_num_speakers = max_num_speakers
+
+    def randomize_parameters(
+        self,
+        samples: Tensor = None,
+        sample_rate: Optional[int] = None,
+        targets: Optional[Tensor] = None,
+        target_rate: Optional[int] = None,
+    ):
+
+        batch_size, num_channels, num_samples = samples.shape
+
+        # randomize SNRs
+        snr_distribution = torch.distributions.Uniform(
+            low=torch.tensor(
+                self.min_snr_in_db,
+                dtype=torch.float32,
+                device=samples.device,
+            ),
+            high=torch.tensor(
+                self.max_snr_in_db,
+                dtype=torch.float32,
+                device=samples.device,
+            ),
+            validate_args=True,
+        )
+        self.transform_parameters["snr_in_db"] = snr_distribution.sample(
+            sample_shape=(batch_size,)
+        )
+
+        embeddings = self.embedder(samples)
+        similarity_mat = cos_sim(embeddings, embeddings)
+
+        # count number of active speakers per sample
+        num_speakers: torch.Tensor = torch.sum(torch.any(targets, dim=-2), dim=-1)
+        max_num_speakers = self.max_num_speakers or torch.max(num_speakers)
+
+        # randomize index of second sample, constrained by the fact that the
+        # resulting mixture should have less than max_num_speakers
+        self.transform_parameters["sample_idx"] = torch.arange(
+            batch_size, dtype=torch.int64
+        )
+        for n in range(max_num_speakers + 1):
+
+            # indices of samples with exactly n speakers
+            samples_with_n_speakers = torch.where(num_speakers == n)[0]
+            num_samples_with_n_speakers = len(samples_with_n_speakers)
+            if num_samples_with_n_speakers == 0:
+                continue
+
+            # indices of candidate samples for mixing (i.e. samples that would)
+            candidates = torch.where(num_speakers + n <= max_num_speakers)[0]
+            num_candidates = len(candidates)
+            if num_candidates == 0:
+                continue
+
+            # create a indexing array with all non candidates
+            non_candidates_indices = torch.ones(batch_size, dtype=bool)
+            non_candidates_indices[candidates] = False
+
+            similarity_mat_n = similarity_mat[samples_with_n_speakers].clone()
+            similarity_mat_n.t()[
+                non_candidates_indices
+            ] = 1.0  # make non candidates have the worst possible value
+            most_different = torch.argmin(similarity_mat_n, dim=1)
+
+            selected_candidates = most_different
+
+            self.transform_parameters["sample_idx"][
+                samples_with_n_speakers
+            ] = selected_candidates
+
+
+# source:
+# https://github.com/UKPLab/sentence-transformers/blob/master/sentence_transformers/util.py#L23
+# under Apache 2 licence (https://github.com/UKPLab/sentence-transformers/blob/master/LICENSE)
+def cos_sim(a: Tensor, b: Tensor):
+    """
+    Computes the cosine similarity cos_sim(a[i], b[j]) for all i and j.
+    :return: Matrix with res[i][j]  = cos_sim(a[i], b[j])
+    """
+    if not isinstance(a, torch.Tensor):
+        a = torch.tensor(a)
+
+    if not isinstance(b, torch.Tensor):
+        b = torch.tensor(b)
+
+    if len(a.shape) == 1:
+        a = a.unsqueeze(0)
+
+    if len(b.shape) == 1:
+        b = b.unsqueeze(0)
+
+    a_norm = torch.nn.functional.normalize(a, p=2, dim=1)
+    b_norm = torch.nn.functional.normalize(b, p=2, dim=1)
+    return torch.mm(a_norm, b_norm.transpose(0, 1))
