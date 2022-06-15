@@ -19,35 +19,6 @@ from pyannote.audio.torchmetrics.functional.audio.diarization_error_rate import 
 )
 
 
-class PseudoLabelPostprocess:
-    def process(
-        self,
-        x: torch.Tensor,
-        pseudo_y: torch.Tensor,
-        y_passes: torch.Tensor,
-        y: torch.Tensor = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Postprocess operation on the data, returns the new x and pseudo_y tensors.
-
-        Parameters
-        ----------
-        x : torch.Tensor
-            Input data tensor
-        pseudo_y : torch.Tensor
-            Pseudolabels (batch_size, num_frames, num_speakers).
-        y_passes : torch.Tensor
-            Outputs of the models (pl_fw_passes, batch_size, num_frames, num_speakers).
-        y : torch.Tensor, optional
-            Oracle truth labels.
-
-        Returns
-        -------
-        Tuple[torch.Tensor, torch.Tensor]
-            Tuple of (x, pseudo_y)
-        """
-        raise NotImplementedError()
-
-
 class UnsupervisedSegmentation(Segmentation, Task):
     def __init__(
         self,
@@ -55,9 +26,6 @@ class UnsupervisedSegmentation(Segmentation, Task):
         protocol: Protocol,
         use_pseudolabels: bool = True,  # generate pseudolabels in training mode
         augmentation_model: BaseWaveformTransform = None,
-        pl_postprocess: Union[
-            PseudoLabelPostprocess, List[PseudoLabelPostprocess]
-        ] = None,
         pl_fw_passes: int = 1,  # how many forward passes to average to get the pseudolabels
         # supervised params
         duration: float = 2.0,
@@ -95,11 +63,6 @@ class UnsupervisedSegmentation(Segmentation, Task):
         self.use_pseudolabels = use_pseudolabels
         self.augmentation_model = augmentation_model
         self.pl_fw_passes = pl_fw_passes
-
-        if isinstance(pl_postprocess, PseudoLabelPostprocess):
-            self.pl_postprocess = [pl_postprocess]
-        else:
-            self.pl_postprocess = pl_postprocess
 
         self.teacher.eval()
 
@@ -171,17 +134,7 @@ class UnsupervisedSegmentation(Segmentation, Task):
             pseudo_y, computed_y_passes = self.get_teacher_outputs_passes(
                 x=x, aug=self.augmentation_model, fw_passes=self.pl_fw_passes
             )
-
-            # apply post processing to pseudo labels and x
-            y = collated_y
-            if self.pl_postprocess is not None:
-                for pp in self.pl_postprocess:
-                    x, pseudo_y = pp.process(
-                        x=x, pseudo_y=pseudo_y, y_passes=computed_y_passes, y=y
-                    )
-
             collated_batch["y"] = pseudo_y
-            collated_batch["X"] = x
 
         # Augment x/pseudo y if an augmentation is specified
         if self.augmentation is not None:
@@ -236,87 +189,6 @@ def _compute_ders(
         )
 
     return ders
-
-
-class DiscardConfidence(PseudoLabelPostprocess):
-    def __init__(self, threshold=0.75) -> None:
-        super().__init__()
-        self.threshold = threshold
-
-    def process(
-        self,
-        x: torch.Tensor,
-        pseudo_y: torch.Tensor,
-        y_passes: torch.Tensor,
-        y: torch.Tensor = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # y_passes is (fw_passes, batch_size, num_frames, num_speakers)-shaped
-        fw_passes, batch_size, num_frames, num_speakers = y_passes.shape
-
-        # y_passes_confidence is of shape (batch_size)
-        y_passes_confidence = torch.mean(
-            torch.abs(
-                torch.mean(y_passes, dim=0).reshape(
-                    batch_size, num_frames * num_speakers
-                )
-                - 0.5
-            )
-            / 0.5,
-            dim=1,
-        )
-
-        filter = y_passes_confidence > self.threshold
-        return x[filter], pseudo_y[filter]
-
-
-class DiscardPercentDer(PseudoLabelPostprocess):
-    def __init__(self, ratio_to_discard: float = 0.1) -> None:
-        self.ratio_to_discard = ratio_to_discard
-
-    def process(
-        self,
-        x: torch.Tensor,
-        pseudo_y: torch.Tensor,
-        y_passes: torch.Tensor,
-        y: torch.Tensor = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        if y is None:
-            return x, pseudo_y
-
-        batch_size = pseudo_y.shape[0]
-        ders = _compute_ders(pseudo_y, y, x)
-        sorted_ders, sorted_indices = torch.sort(ders)
-
-        to_discard_count = min(
-            batch_size, max(1, round(batch_size * self.ratio_to_discard))
-        )
-        pseudo_y = pseudo_y[sorted_indices][:-to_discard_count, :, :]
-        x = x[sorted_indices][:-to_discard_count, :, :]
-
-        return x, pseudo_y
-
-
-class DiscardThresholdDer(PseudoLabelPostprocess):
-    def __init__(self, threshold: float = 0.5) -> None:
-        self.threshold = threshold
-
-    def process(
-        self,
-        x: torch.Tensor,
-        pseudo_y: torch.Tensor,
-        y_passes: torch.Tensor,
-        y: torch.Tensor = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        if y is None:
-            return x, pseudo_y
-
-        ders = _compute_ders(pseudo_y, y, x)
-
-        filter = torch.where(ders < self.threshold)
-        pseudo_y = pseudo_y[filter]
-        x = x[filter]
-
-        return x, pseudo_y
 
 
 class TeacherUpdate(Callback):
