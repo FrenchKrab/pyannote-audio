@@ -22,10 +22,10 @@ from pyannote.audio.torchmetrics.functional.audio.diarization_error_rate import 
 class UnsupervisedSegmentation(Segmentation, Task):
     def __init__(
         self,
-        teacher: Model,  # unsupervised param: model to use to generate truth
         protocol: Protocol,
+        teacher: Model = None,  # unsupervised param: model to use to generate truth
         use_pseudolabels: bool = True,  # generate pseudolabels in training mode
-        augmentation_model: BaseWaveformTransform = None,
+        augmentation_teacher: BaseWaveformTransform = None,
         pl_fw_passes: int = 1,  # how many forward passes to average to get the pseudolabels
         # supervised params
         duration: float = 2.0,
@@ -41,6 +41,58 @@ class UnsupervisedSegmentation(Segmentation, Task):
         vad_loss: Literal["bce", "mse"] = None,
         metric: Union[Metric, Sequence[Metric], Dict[str, Metric]] = None,
     ):
+        """Unsupervised segmentation task.
+
+        Parameters
+        ----------
+        protocol : Protocol
+            pyannote.database protocol
+        teacher : Model, optional
+            Teacher model to use, will use the Task model if left unspecified. Defaults to None.
+        use_pseudolabels : bool, optional
+            Whether or not to use pseudolabels for training. Defaults to True.
+        augmentation_teacher: BaseWaveformTransform, optional
+            What augmentation to apply on the Teacher input. Defaults to None.
+        pl_fw_passes : int, optional
+            How many forward passes to average to get the pseudolabels. Defaults to 1.
+        duration : float, optional
+            Chunks duration. Defaults to 2s.
+        max_num_speakers : int, optional
+            Force maximum number of speakers per chunk (must be at least 2).
+            Defaults to estimating it from the training set.
+        warm_up : float or (float, float), optional
+            Use that many seconds on the left- and rightmost parts of each chunk
+            to warm up the model. While the model does process those left- and right-most
+            parts, only the remaining central part of each chunk is used for computing the
+            loss during training, and for aggregating scores during inference.
+            Defaults to 0. (i.e. no warm-up).
+        balance: str, optional
+            When provided, training samples are sampled uniformly with respect to that key.
+            For instance, setting `balance` to "uri" will make sure that each file will be
+            equally represented in the training samples.
+        weight: str, optional
+            When provided, use this key to as frame-wise weight in loss function.
+        batch_size : int, optional
+            Number of training samples per batch. Defaults to 32.
+        num_workers : int, optional
+            Number of workers used for generating training samples.
+            Defaults to multiprocessing.cpu_count() // 2.
+        pin_memory : bool, optional
+            If True, data loaders will copy tensors into CUDA pinned
+            memory before returning them. See pytorch documentation
+            for more details. Defaults to False.
+        augmentation : BaseWaveformTransform, optional
+            torch_audiomentations waveform transform, used by dataloader
+            during training.
+        loss : {"bce", "mse"}, optional
+            Permutation-invariant segmentation loss. Defaults to "bce".
+        vad_loss : {"bce", "mse"}, optional
+            Add voice activity detection loss.
+        metric : optional
+            Validation metric(s). Can be anything supported by torchmetrics.MetricCollection.
+            Defaults to AUROC (area under the ROC curve).
+        """
+
         super().__init__(
             # Mixin params
             protocol,
@@ -59,9 +111,16 @@ class UnsupervisedSegmentation(Segmentation, Task):
             metric=metric,
         )
 
+        if pl_fw_passes < 1:
+            raise ValueError("pl_fw_passes must be strictly positive.")
+        if teacher is None:
+            raise ValueError(
+                "Using the model as its own teacher isn't supported yet. Please pass a teacher model."
+            )
+
         self.teacher = teacher
         self.use_pseudolabels = use_pseudolabels
-        self.augmentation_model = augmentation_model
+        self.augmentation_teacher = augmentation_teacher
         self.pl_fw_passes = pl_fw_passes
 
         self.teacher.eval()
@@ -132,7 +191,7 @@ class UnsupervisedSegmentation(Segmentation, Task):
             x = collated_X
             # compute pseudo labels
             pseudo_y, computed_y_passes = self.get_teacher_outputs_passes(
-                x=x, aug=self.augmentation_model, fw_passes=self.pl_fw_passes
+                x=x, aug=self.augmentation_teacher, fw_passes=self.pl_fw_passes
             )
             collated_batch["y"] = pseudo_y
 
