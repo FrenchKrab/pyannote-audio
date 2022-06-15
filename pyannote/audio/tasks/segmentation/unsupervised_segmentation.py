@@ -1,34 +1,50 @@
+import warnings
 from typing import Any, Dict, List, Optional, OrderedDict, Sequence, Text, Tuple, Union
 
 import pytorch_lightning as pl
 import torch
 from pyannote.database import Protocol
-from pytorch_lightning import Callback, LightningModule
+from pytorch_lightning import Callback
 from pytorch_lightning.utilities.types import STEP_OUTPUT
 from torch.utils.data import DataLoader
 from torch_audiomentations.core.transforms_interface import BaseWaveformTransform
-from torchmetrics import Metric, MetricCollection
+from torchmetrics import Metric
 from typing_extensions import Literal
 
 from pyannote.audio.core.model import Model
 from pyannote.audio.core.task import Task, ValDataset
 from pyannote.audio.tasks import Segmentation
-from pyannote.audio.torchmetrics.audio.diarization_error_rate import (
-    DiarizationErrorRate,
-    FalseAlarmRate,
-    MissedDetectionRate,
-    SpeakerConfusionRate,
-)
 from pyannote.audio.torchmetrics.functional.audio.diarization_error_rate import (
     diarization_error_rate,
 )
-from pyannote.audio.utils.permutation import permutate
 
 
 class PseudoLabelPostprocess:
     def process(
-        self, pseudo_y: torch.Tensor, y: torch.Tensor, x: torch.Tensor, ys: torch.Tensor
+        self,
+        x: torch.Tensor,
+        pseudo_y: torch.Tensor,
+        y_passes: torch.Tensor,
+        y: torch.Tensor = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Postprocess operation on the data, returns the new x and pseudo_y tensors.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input data tensor
+        pseudo_y : torch.Tensor
+            Pseudolabels (batch_size, num_frames, num_speakers).
+        y_passes : torch.Tensor
+            Outputs of the models (pl_fw_passes, batch_size, num_frames, num_speakers).
+        y : torch.Tensor, optional
+            Oracle truth labels.
+
+        Returns
+        -------
+        Tuple[torch.Tensor, torch.Tensor]
+            Tuple of (x, pseudo_y)
+        """
         raise NotImplementedError()
 
 
@@ -36,17 +52,13 @@ class UnsupervisedSegmentation(Segmentation, Task):
     def __init__(
         self,
         teacher: Model,  # unsupervised param: model to use to generate truth
-        val_model: Model,  # model used to generate truths during validation
         protocol: Protocol,
-        fake_in_train=True,  # generate fake truth in training mode
-        fake_in_val=True,  # generate fake truth in val mode
+        use_pseudolabels: bool = True,  # generate pseudolabels in training mode
         augmentation_model: BaseWaveformTransform = None,
         pl_postprocess: Union[
             PseudoLabelPostprocess, List[PseudoLabelPostprocess]
         ] = None,
         pl_fw_passes: int = 1,  # how many forward passes to average to get the pseudolabels
-        val_fw_passes: int = 1,  # how many forward passes to average to get the validation uncertainty
-        val_augmentation: BaseWaveformTransform = None,
         # supervised params
         duration: float = 2.0,
         max_num_speakers: int = None,
@@ -80,28 +92,9 @@ class UnsupervisedSegmentation(Segmentation, Task):
         )
 
         self.teacher = teacher
-        self.val_model = val_model
-        self.fake_in_train = fake_in_train
-        self.fake_in_val = fake_in_val
+        self.use_pseudolabels = use_pseudolabels
         self.augmentation_model = augmentation_model
         self.pl_fw_passes = pl_fw_passes
-        self.val_fw_passes = val_fw_passes
-        self.val_augmentation = val_augmentation
-
-        if fake_in_val:
-            raise ValueError(
-                "Fake validation (fake_in_val) is not supported, please disable it."
-            )
-
-        if pl_fw_passes > 1 and augmentation_model is None:
-            raise ValueError(
-                "There is no reason to do multiple forward passes to generate pseudolabels if there is no augmentation applied to the input."
-            )
-
-        if val_augmentation is None and val_fw_passes > 1:
-            raise ValueError(
-                f"You need to specify a validation augmentation if you want to do {val_fw_passes} val forward passes."
-            )
 
         if isinstance(pl_postprocess, PseudoLabelPostprocess):
             self.pl_postprocess = [pl_postprocess]
@@ -110,35 +103,28 @@ class UnsupervisedSegmentation(Segmentation, Task):
 
         self.teacher.eval()
 
-    def setup_loss_func(self):
-        # very strange and bad code placement, to replace/move (but it works)
-        self.model.teacher_metrics = MetricCollection(
-            [
-                DiarizationErrorRate(),
-                SpeakerConfusionRate(),
-                MissedDetectionRate(),
-                FalseAlarmRate(),
-            ],
-            prefix=f"{self.logging_prefix}-Teacher",
-        )
-        self.model.teacher_metrics.to(self.model.device)
-
-        self.model.val_model_metrics = MetricCollection(
-            [
-                DiarizationErrorRate(),
-                SpeakerConfusionRate(),
-                MissedDetectionRate(),
-                FalseAlarmRate(),
-            ],
-            prefix=f"{self.logging_prefix}-ValModel",
-        )
-        self.model.val_model_metrics.to(self.model.device)
-
-        return super().setup_loss_func()
-
-    def get_teacher_outputs(
+    def get_teacher_outputs_passes(
         self, x: torch.Tensor, aug: BaseWaveformTransform, fw_passes: int = 1
-    ):
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute the teacher output on the input given an augmentation.
+        Handles averaging multiple forward passes (each with the augmentation reapplied).
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input tensor
+        aug : BaseWaveformTransform
+            Input augmentation
+        fw_passes : int, optional
+            Number of forward passes to apply to get the final output, by default 1
+
+        Returns
+        -------
+        Tuple[torch.Tensor, torch.Tensor]
+            The tuple :
+            - y, the final output, of size (batch_size, num_frames, num_speakers)
+            - y_passes, a tensor of all passes, of size (fw_passes, batch_size, num_frames, num_speakers)
+        """
         out_fw_passes = []
         with torch.no_grad():  # grad causes problems when crossing process boundaries
             # for each forward pass
@@ -164,16 +150,13 @@ class UnsupervisedSegmentation(Segmentation, Task):
     def get_teacher_output(
         self, x: torch.Tensor, aug: BaseWaveformTransform, fw_passes: int = 1
     ):
-        out, _ = self.get_teacher_outputs(x, aug, fw_passes)
+        out, _ = self.get_teacher_outputs_passes(x, aug, fw_passes)
         return out
 
     def use_pseudolabels(self, stage: Literal["train", "val"]):
-        return (stage == "train" and self.fake_in_train) or (
-            stage == "val" and self.fake_in_val
-        )
+        return stage == "train" and self.use_pseudolabels
 
     def collate_fn(self, batch, stage="train"):
-
         collated_X = self.collate_X(batch)
         collated_y = self.collate_y(batch)
         collated_batch = {"X": collated_X, "y": collated_y}
@@ -181,11 +164,11 @@ class UnsupervisedSegmentation(Segmentation, Task):
         if stage != "train":
             raise RuntimeError(f"Unexpected stage in collate_fn (stage={stage})")
 
-        # Generate annotations y with teacher if necessary
+        # Generate pseudolabels with teacher if necessary
         if self.use_pseudolabels("train"):
             x = collated_X
             # compute pseudo labels
-            pseudo_y, computed_ys = self.get_teacher_outputs(
+            pseudo_y, computed_y_passes = self.get_teacher_outputs_passes(
                 x=x, aug=self.augmentation_model, fw_passes=self.pl_fw_passes
             )
 
@@ -193,7 +176,9 @@ class UnsupervisedSegmentation(Segmentation, Task):
             y = collated_y
             if self.pl_postprocess is not None:
                 for pp in self.pl_postprocess:
-                    pseudo_y, x = pp.process(pseudo_y, y, x, computed_ys)
+                    x, pseudo_y = pp.process(
+                        x=x, pseudo_y=pseudo_y, y_passes=computed_y_passes, y=y
+                    )
 
             collated_batch["y"] = pseudo_y
             collated_batch["X"] = x
@@ -236,165 +221,6 @@ class UnsupervisedSegmentation(Segmentation, Task):
         else:
             return None
 
-    def get_summed_gradients(
-        self, model_hyp: LightningModule, model_ref: LightningModule, x: torch.Tensor
-    ):
-        torch.set_grad_enabled(True)
-        model_hyp.train()
-        model_hyp.zero_grad()
-        model_ref.zero_grad()
-        prediction = model_hyp(x)
-        ref_prediction = model_ref(x.to(model_ref.device)).to(model_hyp.device)
-        ref_prediction = (ref_prediction > 0.5).float()
-        permutated_prediction, _ = permutate(ref_prediction, prediction)
-        loss = self.segmentation_loss(permutated_prediction, ref_prediction)
-        loss.backward()
-
-        summed_grad_norm = 0
-        for p in model_hyp.parameters():
-            summed_grad_norm += torch.norm(p.grad)
-
-        model_hyp.zero_grad()
-        model_ref.zero_grad()
-        model_hyp.eval()
-        torch.set_grad_enabled(False)
-        return summed_grad_norm, prediction, loss, ref_prediction
-
-    def training_step(self, batch, batch_idx: int):
-        loss = super().training_step(batch, batch_idx)
-
-        sgn = 0
-        for p in self.model.parameters():
-            sgn += torch.norm(p.grad)
-        self.model.log(
-            f"{self.logging_prefix}Gradients",
-            sgn,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=False,
-            logger=True,
-        )
-
-        return loss
-
-    def validation_step(self, batch, batch_idx: int):
-        super().validation_step(batch, batch_idx)
-
-        X = batch["X"]
-
-        (
-            val_model_sgn,
-            prediction,
-            loss_val_model,
-            val_model_prediction,
-        ) = self.get_summed_gradients(self.model, self.val_model, X)
-        self.model.log(
-            f"{self.logging_prefix}GradientsValModel",
-            val_model_sgn,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            logger=True,
-        )
-        self.model.log(
-            f"{self.logging_prefix}LossValModel",
-            loss_val_model,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            logger=True,
-        )
-
-        outputs = []
-        if self.val_augmentation is not None:
-            for i in range(self.val_fw_passes):
-                augmented = self.val_augmentation(
-                    samples=X, sample_rate=self.model.hparams.sample_rate
-                )
-                pred = self.model(augmented.samples)
-                outputs.append(pred)
-        else:
-            outputs.append(prediction)
-        outputs = torch.stack(outputs)
-
-        # Compute ang log uncertainty
-        std = torch.std(outputs, dim=0)
-        self.model.log(
-            f"{self.logging_prefix}Uncertainty",
-            std.flatten(),
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            logger=True,
-        )
-
-        # Compute and log confidence
-        outputs_mean = torch.mean(outputs, dim=0)
-        CONFIDENCE_CENTER = 0.5
-        confidence = 1 - torch.abs(CONFIDENCE_CENTER - outputs_mean) / 0.5
-        self.model.log(
-            f"{self.logging_prefix}Confidence",
-            confidence.flatten(),
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            logger=True,
-        )
-
-        CONFIDENCE_CENTER = 0.25
-        confidence = 1 - torch.abs(CONFIDENCE_CENTER - outputs_mean) / torch.where(
-            outputs_mean > CONFIDENCE_CENTER, 1 - CONFIDENCE_CENTER, CONFIDENCE_CENTER
-        )
-
-        self.model.log(
-            f"{self.logging_prefix}Confidence25",
-            confidence.flatten(),
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            logger=True,
-        )
-
-        _, num_frames, _ = prediction.shape
-        warm_up_left = round(self.warm_up[0] / self.duration * num_frames)
-        warm_up_right = round(self.warm_up[1] / self.duration * num_frames)
-        preds = prediction[:, warm_up_left : num_frames - warm_up_right : 10]
-
-        teacher_prediction = self.teacher(X.to(self.teacher.device)).to(
-            val_model_prediction.device
-        )
-        teacher_prediction = (teacher_prediction > 0.5).float()
-        target_teacher = teacher_prediction[
-            :, warm_up_left : num_frames - warm_up_right : 10
-        ]
-        target_val_model = val_model_prediction[
-            :, warm_up_left : num_frames - warm_up_right : 10
-        ]
-
-        self.model.teacher_metrics(
-            torch.transpose(preds, 1, 2),
-            torch.transpose(target_teacher, 1, 2),
-        )
-        self.model.val_model_metrics(
-            torch.transpose(preds, 1, 2),
-            torch.transpose(target_val_model, 1, 2),
-        )
-
-        self.model.log_dict(
-            self.model.teacher_metrics,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            logger=True,
-        )
-        self.model.log_dict(
-            self.model.val_model_metrics,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            logger=True,
-        )
-
 
 def _compute_ders(
     pseudo_y: torch.Tensor, y: torch.Tensor, x: torch.Tensor
@@ -418,23 +244,29 @@ class DiscardConfidence(PseudoLabelPostprocess):
         self.threshold = threshold
 
     def process(
-        self, pseudo_y: torch.Tensor, y: torch.Tensor, x: torch.Tensor, ys: torch.Tensor
+        self,
+        x: torch.Tensor,
+        pseudo_y: torch.Tensor,
+        y_passes: torch.Tensor,
+        y: torch.Tensor = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # ys is (fw_passes, batch_size, num_frames, num_speakers)-shaped
-        fw_passes, batch_size, num_frames, num_speakers = ys.shape
+        # y_passes is (fw_passes, batch_size, num_frames, num_speakers)-shaped
+        fw_passes, batch_size, num_frames, num_speakers = y_passes.shape
 
-        # ys_confidence is of shape (batch_size)
-        ys_confidence = torch.mean(
+        # y_passes_confidence is of shape (batch_size)
+        y_passes_confidence = torch.mean(
             torch.abs(
-                torch.mean(ys, dim=0).reshape(batch_size, num_frames * num_speakers)
+                torch.mean(y_passes, dim=0).reshape(
+                    batch_size, num_frames * num_speakers
+                )
                 - 0.5
             )
             / 0.5,
             dim=1,
         )
 
-        filter = ys_confidence > self.threshold
-        return pseudo_y[filter], x[filter]
+        filter = y_passes_confidence > self.threshold
+        return x[filter], pseudo_y[filter]
 
 
 class DiscardPercentDer(PseudoLabelPostprocess):
@@ -442,8 +274,15 @@ class DiscardPercentDer(PseudoLabelPostprocess):
         self.ratio_to_discard = ratio_to_discard
 
     def process(
-        self, pseudo_y: torch.Tensor, y: torch.Tensor, x: torch.Tensor, ys: torch.Tensor
+        self,
+        x: torch.Tensor,
+        pseudo_y: torch.Tensor,
+        y_passes: torch.Tensor,
+        y: torch.Tensor = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if y is None:
+            return x, pseudo_y
+
         batch_size = pseudo_y.shape[0]
         ders = _compute_ders(pseudo_y, y, x)
         sorted_ders, sorted_indices = torch.sort(ders)
@@ -454,7 +293,7 @@ class DiscardPercentDer(PseudoLabelPostprocess):
         pseudo_y = pseudo_y[sorted_indices][:-to_discard_count, :, :]
         x = x[sorted_indices][:-to_discard_count, :, :]
 
-        return pseudo_y, x
+        return x, pseudo_y
 
 
 class DiscardThresholdDer(PseudoLabelPostprocess):
@@ -462,15 +301,22 @@ class DiscardThresholdDer(PseudoLabelPostprocess):
         self.threshold = threshold
 
     def process(
-        self, pseudo_y: torch.Tensor, y: torch.Tensor, x: torch.Tensor, ys: torch.Tensor
+        self,
+        x: torch.Tensor,
+        pseudo_y: torch.Tensor,
+        y_passes: torch.Tensor,
+        y: torch.Tensor = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if y is None:
+            return x, pseudo_y
+
         ders = _compute_ders(pseudo_y, y, x)
 
         filter = torch.where(ders < self.threshold)
         pseudo_y = pseudo_y[filter]
         x = x[filter]
 
-        return pseudo_y, x
+        return x, pseudo_y
 
 
 class TeacherUpdate(Callback):
@@ -501,12 +347,14 @@ class TeacherUpdate(Callback):
         self, progress: int, current_model: pl.LightningModule
     ) -> bool:
         """Called every time the teacher might need to be updated.
+
         Parameters
         ----------
         progress : int
             Describes how far we are in training (epoch number or batch number)
         current_model : pl.LightningModule
             Current model being trained.
+
         Returns
         -------
         bool
@@ -518,6 +366,7 @@ class TeacherUpdate(Callback):
 
     def _compute_teacher_weights(self) -> OrderedDict[str, torch.Tensor]:
         """Computes the new teacher weights from the internal state.
+
         Returns
         -------
         OrderedDict[str, torch.Tensor]
@@ -527,6 +376,7 @@ class TeacherUpdate(Callback):
 
     def _setup_initial(self, initial_model_w: OrderedDict[str, torch.Tensor]):
         """Called once before training. Useful to setup the initial internal state.
+
         Parameters
         ----------
         initial_model_w : OrderedDict[str, torch.Tensor]
@@ -589,6 +439,18 @@ class TeacherUpdate(Callback):
         }
 
 
+def get_decayed_weights(
+    teacher_w: OrderedDict[str, torch.Tensor],
+    student_w: OrderedDict[str, torch.Tensor],
+    tau: float,
+):
+    with torch.no_grad():
+        return {
+            k: teacher_w[k] * tau + student_w[k].to(teacher_w[k].device) * (1 - tau)
+            for k in student_w.keys()
+        }
+
+
 class TeacherQueueUpdate(TeacherUpdate):
     def __init__(
         self,
@@ -596,6 +458,17 @@ class TeacherQueueUpdate(TeacherUpdate):
         average_of: int = 1,
         update_interval: int = 1,
     ):
+        """The teacher is the average of a queue of the last states of the student.
+
+        Parameters
+        ----------
+        when : Literal['epoch', 'batch'], optional
+            When should the update happen, by default "epoch"
+        average_of : int, optional
+            Queue max length, by default 1
+        update_interval : int, optional
+            Update will happen every 'update_interval' epochs/batches, by default 1
+        """
         super().__init__(when=when)
 
         self.average_of = average_of
@@ -622,6 +495,97 @@ class TeacherQueueUpdate(TeacherUpdate):
         self.weights_queue.append(teacher)
         if len(self.weights_queue) > self.average_of:
             self.weights_queue.pop(0)
+
+
+class TeacherCopyUpdate(TeacherUpdate):
+    def __init__(
+        self,
+        when: Literal["epoch", "batch"] = "epoch",
+        update_interval: int = 1,
+    ):
+        """Instant weights copy.
+
+        Parameters
+        ----------
+        when : Literal['epoch', 'batch'], optional
+            When should the update happen, by default "epoch"
+        update_interval : int, optional
+            Update will happen every 'update_interval' epochs/batches, by default 1
+        """
+
+        super().__init__(when=when)
+
+        self.update_interval = update_interval
+        self.last_weights = None
+
+    def _setup_initial(self, initial_model_w: OrderedDict[str, torch.Tensor]):
+        self.last_weights = initial_model_w
+
+    def _compute_teacher_weights(self) -> OrderedDict[str, torch.Tensor]:
+        return self.last_weights
+
+    def _teacher_update_state(
+        self, progress: int, current_model: pl.LightningModule
+    ) -> bool:
+        if progress % self.update_interval != 0:
+            return False
+
+        self.last_weights = current_model.state_dict()
+        return True
+
+
+class TeacherEmaUpdate(TeacherUpdate):
+    def __init__(
+        self,
+        when: Literal["epoch", "batch"] = "epoch",
+        update_interval: int = 1,
+        update_rate: float = 0.999,
+    ):
+        """Instant weights copy.
+
+        Parameters
+        ----------
+        when : Literal['epoch', 'batch'], optional
+            When should the update happen, by default "epoch"
+        update_interval : int, optional
+            Update will happen every 'update_interval' epochs/batches, by default 1
+        update_rate : float, optional
+            How much to keep of the old weights each update. 0=instant copy, 1=never update weights.
+        """
+
+        super().__init__(when=when)
+
+        if update_rate < 0.0 or update_rate > 1.0:
+            raise ValueError(
+                f"Illegal update rate value ({update_rate}), it should be in [0.0,1.0]"
+            )
+        if update_rate == 0.0:
+            warnings.warn(
+                "You are using an EMA update with 0.0 update rate, consider using a TeacherCopyUpdate instead."
+            )
+
+        self.update_interval = update_interval
+        self.update_rate = update_rate
+        self.teacher_weights = None
+
+    def _setup_initial(self, initial_model_w: OrderedDict[str, torch.Tensor]):
+        self.teacher_weights = initial_model_w
+
+    def _compute_teacher_weights(self) -> OrderedDict[str, torch.Tensor]:
+        return self.teacher_weights
+
+    def _teacher_update_state(
+        self, progress: int, current_model: pl.LightningModule
+    ) -> bool:
+        if progress % self.update_interval != 0:
+            return False
+
+        self.teacher_weights = get_decayed_weights(
+            teacher_w=self.teacher_weights,
+            student_w=current_model.state_dict(),
+            tau=self.update_rate,
+        )
+        return True
 
 
 class TeacherTeamUpdate(TeacherUpdate):
@@ -657,18 +621,6 @@ class TeacherTeamUpdate(TeacherUpdate):
         # The weights of the team of teachers that will be averaged
         self.team_weights: List[OrderedDict[str, torch.Tensor]] = []
 
-    def get_decayed_weights(
-        self,
-        teacher_w: OrderedDict[str, torch.Tensor],
-        student_w: OrderedDict[str, torch.Tensor],
-        tau: float,
-    ):
-        with torch.no_grad():
-            return {
-                k: teacher_w[k] * tau + student_w[k].to(teacher_w[k].device) * (1 - tau)
-                for k in student_w.keys()
-            }
-
     def get_update_rate(self, index) -> float:
         return self.weight_update_rate[index]
 
@@ -688,7 +640,7 @@ class TeacherTeamUpdate(TeacherUpdate):
                 continue
             print(f"updating teacher {i}")
 
-            new_teacher_i_w = self.get_decayed_weights(
+            new_teacher_i_w = get_decayed_weights(
                 teacher_w=self.team_weights[i],
                 student_w=model.state_dict(),
                 tau=self.get_update_rate(i),
