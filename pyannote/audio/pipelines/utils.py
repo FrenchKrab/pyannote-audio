@@ -21,18 +21,22 @@
 # SOFTWARE.
 
 import itertools
+import math
 from copy import deepcopy
 from typing import Any, Mapping, Optional, Text, Tuple, Union
 
+import networkx as nx
 import numpy as np
 import torch
+from pyannote.core import Annotation, Segment, SlidingWindow, SlidingWindowFeature
+from pyannote.metrics.diarization import DiarizationErrorRate
 from torch_audiomentations.core.transforms_interface import BaseWaveformTransform
 from torch_audiomentations.utils.config import from_dict as augmentation_from_dict
 
-from pyannote.audio import Inference, Model
+from pyannote.audio import Audio, Inference, Model
+from pyannote.audio.core.io import AudioFile
+from pyannote.audio.utils.permutation import mae_cost_func, permutate
 from pyannote.audio.utils.signal import Binarize, binarize
-from pyannote.core import Annotation, SlidingWindow, SlidingWindowFeature
-from pyannote.metrics.diarization import DiarizationErrorRate
 
 PipelineModel = Union[Model, Text, Mapping]
 
@@ -199,12 +203,15 @@ def logging_hook(key: Text, value: Any, file: Optional[Mapping] = None):
     file[key] = deepcopy(value)
 
 
+# TODO: move to dedicated module
 class SpeakerDiarizationMixin:
     """Defines a bunch of methods common to speaker diarization pipelines"""
 
     @staticmethod
     def set_num_speakers(
-        num_speakers: int = None, min_speakers: int = None, max_speakers: int = None,
+        num_speakers: int = None,
+        min_speakers: int = None,
+        max_speakers: int = None,
     ):
         """Validate number of speakers
 
@@ -268,11 +275,13 @@ class SpeakerDiarizationMixin:
         )
         return hypothesis.rename_labels(mapping=mapping)
 
+    # TODO: get rid of onset/offset (binarization should be applied before calling speaker_count)
+    # TODO: get rid of warm-up parameter (trimming should be applied before calling speaker_count)
     @staticmethod
     def speaker_count(
         segmentations: SlidingWindowFeature,
         onset: float = 0.5,
-        offset: float = 0.5,
+        offset: float = None,
         warm_up: Tuple[float, float] = (0.1, 0.1),
         frames: SlidingWindow = None,
     ) -> SlidingWindowFeature:
@@ -285,7 +294,7 @@ class SpeakerDiarizationMixin:
         onset : float, optional
            Onset threshold. Defaults to 0.5
         offset : float, optional
-           Offset threshold. Defaults to 0.5
+           Offset threshold. Defaults to `onset`.
         warm_up : (float, float) tuple, optional
             Left/right warm up ratio of chunk duration.
             Defaults to (0.1, 0.1), i.e. 10% on both sides.
@@ -299,6 +308,7 @@ class SpeakerDiarizationMixin:
         count : SlidingWindowFeature
             (num_frames, 1)-shaped instantaneous speaker count
         """
+
         binarized: SlidingWindowFeature = binarize(
             segmentations, onset=onset, offset=offset, initial_state=False
         )
@@ -314,13 +324,101 @@ class SpeakerDiarizationMixin:
         return count
 
     @staticmethod
+    def get_stitching_graph(segmentations: SlidingWindowFeature) -> nx.Graph:
+        """Build stitching graph
+
+        Each active speaker is represented by a (chunk_idx, speaker_idx) node.
+
+        Any pair of (overlapping) chunks go through the process of finding the
+        optimal mapping of their respective speakers. Edges between speakers from
+        two different chunks indicate that they were matched in the process.
+        Those edges are weighted by the number of active frames in common.
+
+        Edges between speakers from the same chunk indicate that they are overlapping.
+        Those edges are weighted by the (negative) number of overlapping frames.
+        We use negative values to indicate that those speakers are most likely two
+        different speakers (according to the segmentation).
+
+        Parameters
+        ----------
+        segmentations : (num_chunks, num_frames, num_speakers)-shaped SlidingWindowFeature
+            (Raw or binarized) output of segmentation model.
+
+        Returns
+        -------
+        stitching_graph : nx.Graph
+            Stitching graph (see description above).
+
+        """
+
+        chunks = segmentations.sliding_window
+        num_chunks, num_frames, num_speakers = segmentations.data.shape
+        max_lookahead = math.floor(chunks.duration / chunks.step - 1)
+        lookahead = 2 * (max_lookahead,)
+
+        stitching_graph = nx.Graph()
+
+        # for each chunk
+        for C, (chunk, segmentation) in enumerate(segmentations):
+
+            # for each adjacent chunk
+            for c in range(
+                max(0, C - lookahead[0]), min(num_chunks, C + lookahead[1] + 1)
+            ):
+
+                # speakers from the same chunk
+                if c == C:
+
+                    # connect each pair of speakers by an edge weighted by how much they overlap
+                    for this, that in itertools.combinations(range(num_speakers), 2):
+                        num_overlapping_frames = np.sum(
+                            segmentation[:, this] * segmentation[:, that]
+                        )
+                        stitching_graph.add_edge(
+                            (C, this), (c, that), cost=-num_overlapping_frames
+                        )
+
+                # speakers from adjacent chunks
+                else:
+
+                    # extract temporal support common to both chunks
+                    shift = round((C - c) * num_frames * chunks.step / chunks.duration)
+
+                    if shift < 0:
+                        this_segmentations = segmentation[-shift:]
+                        that_segmentations = segmentations[c, : num_frames + shift]
+                    else:
+                        this_segmentations = segmentation[: num_frames - shift]
+                        that_segmentations = segmentations[c, shift:]
+
+                    # find the optimal bijective mapping between their respective speakers
+                    _, (permutation,) = permutate(
+                        this_segmentations[np.newaxis],
+                        that_segmentations,
+                        cost_func=mae_cost_func,
+                        return_cost=False,
+                    )
+
+                    # connect each pair of mapped speakers by an edge weighted by how much
+                    # active frames they have in common
+                    for this, that in enumerate(permutation):
+                        num_matching_frames = np.sum(
+                            this_segmentations[:, this] * that_segmentations[:, that]
+                        )
+                        stitching_graph.add_edge(
+                            (C, this), (c, that), cost=num_matching_frames
+                        )
+
+        return stitching_graph
+
+    @staticmethod
     def to_annotation(
         discrete_diarization: SlidingWindowFeature,
         min_duration_on: float = 0.0,
         min_duration_off: float = 0.0,
     ) -> Annotation:
         """
-        
+
         Parameters
         ----------
         discrete_diarization : SlidingWindowFeature
@@ -347,7 +445,8 @@ class SpeakerDiarizationMixin:
 
     @staticmethod
     def to_diarization(
-        segmentations: SlidingWindowFeature, count: SlidingWindowFeature,
+        segmentations: SlidingWindowFeature,
+        count: SlidingWindowFeature,
     ) -> SlidingWindowFeature:
         """Build diarization out of preprocessed segmentation and precomputed speaker count
 
@@ -367,9 +466,9 @@ class SpeakerDiarizationMixin:
         activations = Inference.aggregate(
             segmentations,
             frames=count.sliding_window,
-            hamming=True,
+            hamming=False,
             missing=0.0,
-            skip_average=True,
+            skip_average=False,
         )
 
         _, num_speakers = activations.data.shape
@@ -393,3 +492,80 @@ class SpeakerDiarizationMixin:
         while True:
             yield f"SPEAKER_{speaker:02d}"
             speaker += 1
+
+
+def oracle_segmentation(
+    file: AudioFile,
+    window: SlidingWindow,
+    frames: Union[SlidingWindow, float],
+    num_speakers: int = None,
+) -> SlidingWindowFeature:
+    """Oracle speaker segmentation
+
+    Simulates inference based on an (imaginary) oracle segmentation model:
+
+    >>> oracle = Model.from_pretrained("oracle")
+    >>> assert frames == oracle.introspection.frames
+    >>> inference = Inference(oracle, duration=window.duration, step=window.step, skip_aggregation=True)
+    >>> oracle_segmentation = inference(file)
+
+    Parameters
+    ----------
+    file : AudioFile
+        Audio file with "annotation".
+    window : SlidingWindow
+        Sliding window used for inference (see above)
+    frames : SlidingWindow or float
+        Output resolution of the oracle model (see above)
+    num_speakers : int, optional
+        Override the number of speakers returned by the oracle segmentation model
+        Defaults to the actual number of speakers in the whole file
+
+    Returns
+    -------
+    oracle_segmentation : (num_chunks, num_frames, num_speakers) SlidingWindowFeature
+        Oracle segmentation.
+    """
+
+    if "duration" not in file:
+        duration = Audio().get_duration(file)
+    else:
+        duration: float = file["duration"]
+    reference: Annotation = file["annotation"]
+
+    if not isinstance(frames, SlidingWindow):
+        frames = SlidingWindow(start=0.0, step=frames, duration=frames)
+
+    labels = reference.labels()
+    actual_num_speakers = len(labels)
+    if num_speakers is None:
+        num_speakers = actual_num_speakers
+
+    if num_speakers > actual_num_speakers:
+        num_missing = num_speakers - actual_num_speakers
+        labels += [
+            f"FakeSpeakerForOracleSegmentationInference{i:d}"
+            for i in range(num_missing)
+        ]
+
+    window = SlidingWindow(start=0.0, duration=window.duration, step=window.step)
+
+    segmentations = []
+    for chunk in window(Segment(0.0, duration)):
+        chunk_segmentation: SlidingWindowFeature = reference.discretize(
+            chunk,
+            resolution=frames,
+            labels=labels,
+            duration=window.duration,
+        )
+
+        if num_speakers < actual_num_speakers:
+            # keep `num_speakers` most talkative speakers
+            most_talkative_index = np.argsort(-np.sum(chunk_segmentation, axis=0))[
+                :num_speakers
+            ]
+            chunk_segmentation = chunk_segmentation[:, most_talkative_index]
+
+        segmentations.append(chunk_segmentation)
+
+    return SlidingWindowFeature(np.float32(np.stack(segmentations)), window)
