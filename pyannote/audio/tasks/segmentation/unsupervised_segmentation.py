@@ -175,9 +175,6 @@ class UnsupervisedSegmentation(Segmentation, Task):
         out, _ = self.get_teacher_outputs_passes(x, aug, fw_passes)
         return out
 
-    def use_pseudolabels(self, stage: Literal["train", "val"]):
-        return stage == "train" and self.use_pseudolabels
-
     def collate_fn(self, batch, stage="train"):
         collated_X = self.collate_X(batch)
         collated_y = self.collate_y(batch)
@@ -187,7 +184,7 @@ class UnsupervisedSegmentation(Segmentation, Task):
             raise RuntimeError(f"Unexpected stage in collate_fn (stage={stage})")
 
         # Generate pseudolabels with teacher if necessary
-        if self.use_pseudolabels("train"):
+        if self.use_pseudolabels:
             x = collated_X
             # compute pseudo labels
             pseudo_y, computed_y_passes = self.get_teacher_outputs_passes(
@@ -215,7 +212,7 @@ class UnsupervisedSegmentation(Segmentation, Task):
 
         # Generate annotations y with teacher if they are not provided
         # TODO: reimplement or discard fake validation
-        if self.use_pseudolabels("val"):
+        if self.use_pseudolabels:
             pass
 
         return collated_batch
