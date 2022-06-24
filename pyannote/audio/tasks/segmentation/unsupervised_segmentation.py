@@ -564,9 +564,7 @@ class TeacherTeamUpdate(TeacherUpdate):
         for i in range(len(self.update_interval)):
             interval = self.update_interval[i]
             if interval == 0 or progress % interval != 0:
-                print(f"NOT updated teacher {i}")
                 continue
-            print(f"updating teacher {i}")
 
             new_teacher_i_w = get_decayed_weights(
                 teacher_w=self.team_weights[i],
