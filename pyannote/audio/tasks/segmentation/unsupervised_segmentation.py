@@ -1,29 +1,24 @@
-import warnings
-from typing import Any, Dict, List, Optional, OrderedDict, Sequence, Text, Tuple, Union
+from typing import Any, Dict, Optional, OrderedDict, Sequence, Text, Tuple, Union
 
 import pytorch_lightning as pl
 import torch
 from pyannote.database import Protocol
 from pytorch_lightning import Callback
 from pytorch_lightning.utilities.types import STEP_OUTPUT
-from torch.utils.data import DataLoader
 from torch_audiomentations.core.transforms_interface import BaseWaveformTransform
 from torchmetrics import Metric
 from typing_extensions import Literal
 
 from pyannote.audio.core.model import Model
-from pyannote.audio.core.task import Task, ValDataset
+from pyannote.audio.core.task import Task
 from pyannote.audio.tasks import Segmentation
-from pyannote.audio.torchmetrics.functional.audio.diarization_error_rate import (
-    diarization_error_rate,
-)
 
 
 class UnsupervisedSegmentation(Segmentation, Task):
     def __init__(
         self,
         protocol: Protocol,
-        teacher: Model = None,  # unsupervised param: model to use to generate truth
+        teacher: Model,  # unsupervised param: model to use to generate truth
         use_pseudolabels: bool = True,  # generate pseudolabels in training mode
         augmentation_teacher: BaseWaveformTransform = None,
         pl_fw_passes: int = 1,  # how many forward passes to average to get the pseudolabels
@@ -163,15 +158,19 @@ class UnsupervisedSegmentation(Segmentation, Task):
                 # Compute pseudolabels and detach to avoid "memory leaks"
                 pl = self.teacher(waveforms=teacher_input).detach()
                 out_fw_passes.append(pl)
-            # compute mean of forward passes
-            out = torch.mean(torch.stack(out_fw_passes), dim=0)
+            # compute mean of forward passes if needed, and round to make pseudolabels
+            stacked_passes = torch.stack(out_fw_passes)
+            if fw_passes == 1:
+                out = out_fw_passes[0]
+            else:
+                out = torch.mean(stacked_passes, dim=0)
             out = torch.round(out).type(torch.int8)
 
-        return out, torch.stack(out_fw_passes)
+        return out, stacked_passes
 
     def get_teacher_output(
         self, x: torch.Tensor, aug: BaseWaveformTransform, fw_passes: int = 1
-    ):
+    ) -> torch.Tensor:
         out, _ = self.get_teacher_outputs_passes(x, aug, fw_passes)
         return out
 
@@ -180,14 +179,14 @@ class UnsupervisedSegmentation(Segmentation, Task):
         collated_y = self.collate_y(batch)
         collated_batch = {"X": collated_X, "y": collated_y}
 
-        if stage != "train":
-            raise RuntimeError(f"Unexpected stage in collate_fn (stage={stage})")
+        if stage == "val":
+            return collated_batch
 
         # Generate pseudolabels with teacher if necessary
         if self.use_pseudolabels:
             x = collated_X
             # compute pseudo labels
-            pseudo_y, computed_y_passes = self.get_teacher_outputs_passes(
+            pseudo_y = self.get_teacher_output(
                 x=x, aug=self.augmentation_teacher, fw_passes=self.pl_fw_passes
             )
             collated_batch["y"] = pseudo_y
@@ -204,62 +203,27 @@ class UnsupervisedSegmentation(Segmentation, Task):
 
         return collated_batch
 
-    def collate_fn_val(self, batch):
-        collated_X = self.collate_X(batch)
-        collated_y = self.collate_y(batch)
 
-        collated_batch = {"X": collated_X, "y": collated_y}
-
-        # Generate annotations y with teacher if they are not provided
-        # TODO: reimplement or discard fake validation
-        if self.use_pseudolabels:
-            pass
-
-        return collated_batch
-
-    def val_dataloader(self) -> Optional[DataLoader]:
-        if self.has_validation:
-            return DataLoader(
-                ValDataset(self),
-                batch_size=self.batch_size,
-                num_workers=self.num_workers,
-                pin_memory=self.pin_memory,
-                drop_last=False,
-                collate_fn=self.collate_fn_val,
-            )
-        else:
-            return None
-
-
-def _compute_ders(
-    pseudo_y: torch.Tensor, y: torch.Tensor, x: torch.Tensor
-) -> Tuple[torch.Tensor]:
-    batch_size = pseudo_y.shape[0]
-    ders = torch.zeros(batch_size)
-
-    tm_pseudo_y = pseudo_y.swapaxes(1, 2)
-    tm_true_y = y.swapaxes(1, 2)
-    for i in range(batch_size):
-        ders[i] = diarization_error_rate(
-            tm_pseudo_y[i][None, :, :], tm_true_y[i][None, :, :]
-        )
-
-    return ders
-
-
-class TeacherUpdate(Callback):
-    def __init__(self, when: Literal["epoch", "batch"]) -> None:
-        """Abstract class for teacher update callback.
-        _teacher_update_state, _compute_teacher_weights and _setup_initial needs to be overriden.
+class TeacherEmaUpdate(Callback):
+    def __init__(
+        self,
+        when: Literal["epoch", "batch"] = "epoch",
+        update_interval: int = 1,
+        update_rate: float = 0.99,
+    ):
+        """Exponential moving average of weights.
 
         Parameters
         ----------
         when : Literal['epoch', 'batch'], optional
-            When the update is applied.
+            When should the update happen, by default "epoch"
+        update_interval : int, optional
+            Update will happen every 'update_interval' epochs/batches, by default 1
+        update_rate : float, optional
+            How much to keep of the old weights each update. 0=instant copy, 1=never update weights. By default 0.99.
         """
 
         super().__init__()
-        self.initialized = False
 
         self.when = when
         if self.when != "epoch" and self.when != "batch":
@@ -267,65 +231,49 @@ class TeacherUpdate(Callback):
                 "TeacherUpdate 'when' argument can only be 'epoch' or 'batch'"
             )
 
-        # The "real" teacher weights to be used by the task.
-        # TODO: determine if useless ?
-        self.cache: OrderedDict[str, torch.Tensor] = None
+        if update_rate < 0.0 or update_rate > 1.0:
+            raise ValueError(
+                f"Illegal update rate value ({update_rate}), it should be in [0.0,1.0]"
+            )
+
+        self.update_interval = update_interval
+        self.update_rate = update_rate
+        self.teacher_weights = None
+
+    @staticmethod
+    def get_decayed_weights(
+        teacher_w: OrderedDict[str, torch.Tensor],
+        student_w: OrderedDict[str, torch.Tensor],
+        tau: float,
+    ):
+        with torch.no_grad():
+            return {
+                k: teacher_w[k] * tau + student_w[k].to(teacher_w[k].device) * (1 - tau)
+                for k in student_w.keys()
+            }
+
+    # --- Methods that get called when necessary
+
+    def _setup_initial(self, initial_model_w: OrderedDict[str, torch.Tensor]):
+        self.teacher_weights = initial_model_w
+
+    def _compute_teacher_weights(self) -> OrderedDict[str, torch.Tensor]:
+        return self.teacher_weights
 
     def _teacher_update_state(
         self, progress: int, current_model: pl.LightningModule
     ) -> bool:
-        """Called every time the teacher might need to be updated.
+        if progress % self.update_interval != 0:
+            return False
 
-        Parameters
-        ----------
-        progress : int
-            Describes how far we are in training (epoch number or batch number)
-        current_model : pl.LightningModule
-            Current model being trained.
+        self.teacher_weights = TeacherEmaUpdate.get_decayed_weights(
+            teacher_w=self.teacher_weights,
+            student_w=current_model.state_dict(),
+            tau=self.update_rate,
+        )
+        return True
 
-        Returns
-        -------
-        bool
-            Whether or not the internal state has been updated.
-            If true, the 'teacher' attribute of the model will be updated with
-            newly computed weights from _compute_teacher_weights.
-        """
-        raise NotImplementedError()
-
-    def _compute_teacher_weights(self) -> OrderedDict[str, torch.Tensor]:
-        """Computes the new teacher weights from the internal state.
-
-        Returns
-        -------
-        OrderedDict[str, torch.Tensor]
-            New teacher weights
-        """
-        raise NotImplementedError()
-
-    def _setup_initial(self, initial_model_w: OrderedDict[str, torch.Tensor]):
-        """Called once before training. Useful to setup the initial internal state.
-
-        Parameters
-        ----------
-        initial_model_w : OrderedDict[str, torch.Tensor]
-            Current (initial) model weights.
-        """
-        raise NotImplementedError()
-
-    def update_teacher_and_cache(
-        self, progress: int, trainer: pl.Trainer, model: pl.LightningModule
-    ):
-        # will indicate if teacher cache needs to be updated
-        cache_dirty = self._teacher_update_state(progress, model)
-
-        # If a weight has changed, compute updated teacher weights, cache it, and assign it
-        if cache_dirty:
-            try:
-                new_teacher_w = self._compute_teacher_weights()
-                self.cache = new_teacher_w
-                model.task.teacher.load_state_dict(new_teacher_w)
-            except AttributeError as err:
-                print(f"TeacherUpdate callback can't be applied on this model : {err}")
+    # --- Callback hooks
 
     def on_train_batch_end(
         self,
@@ -345,232 +293,24 @@ class TeacherUpdate(Callback):
         if self.when == "epoch":
             self.update_teacher_and_cache(trainer.current_epoch, trainer, pl_module)
 
-    def on_train_start(
-        self, trainer: pl.Trainer, pl_module: pl.LightningModule
-    ) -> None:
-        # Only initialize once
-        if self.initialized:
-            return
-        self.initialized = True
-
+    def on_fit_start(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
         initial_teacher_w = pl_module.task.teacher.state_dict()
         self._setup_initial(initial_teacher_w)
-        self.cache = initial_teacher_w
 
-    @staticmethod
-    def get_averaged_weights(
-        weights: List[OrderedDict[str, torch.Tensor]]
-    ) -> OrderedDict[str, torch.Tensor]:
-        return {
-            k: torch.mean(torch.stack([w[k] for w in weights]), dim=0)
-            for k in weights[0]
-        }
+    # --- Generic logic called from hooks
 
-
-def get_decayed_weights(
-    teacher_w: OrderedDict[str, torch.Tensor],
-    student_w: OrderedDict[str, torch.Tensor],
-    tau: float,
-):
-    with torch.no_grad():
-        return {
-            k: teacher_w[k] * tau + student_w[k].to(teacher_w[k].device) * (1 - tau)
-            for k in student_w.keys()
-        }
-
-
-class TeacherQueueUpdate(TeacherUpdate):
-    def __init__(
-        self,
-        when: Literal["epoch", "batch"] = "epoch",
-        average_of: int = 1,
-        update_interval: int = 1,
+    def update_teacher_and_cache(
+        self, progress: int, trainer: pl.Trainer, model: pl.LightningModule
     ):
-        """The teacher is the average of a queue of the last states of the student.
+        # will indicate if teacher cache needs to be updated
+        cache_dirty = self._teacher_update_state(progress, model)
 
-        Parameters
-        ----------
-        when : Literal['epoch', 'batch'], optional
-            When should the update happen, by default "epoch"
-        average_of : int, optional
-            Queue max length, by default 1
-        update_interval : int, optional
-            Update will happen every 'update_interval' epochs/batches, by default 1
-        """
-        super().__init__(when=when)
-
-        self.average_of = average_of
-        self.update_interval = update_interval
-        self.weights_queue: List[OrderedDict[str, torch.Tensor]] = None
-        pass
-
-    def _setup_initial(self, initial_model_w: OrderedDict[str, torch.Tensor]):
-        self.weights_queue = []
-
-    def _compute_teacher_weights(self) -> OrderedDict[str, torch.Tensor]:
-        return TeacherUpdate.get_averaged_weights(self.weights_queue)
-
-    def _teacher_update_state(self, progress: int, model: pl.LightningModule) -> bool:
-        if progress % self.update_interval != 0:
-            return False
-
-        # Get new teacher "candidate" (from decayed weights) and enqueue it in the teacher history
-        teacher_candidate_w = model.state_dict()
-        self.enqueue_to_team(teacher_candidate_w)
-        return True
-
-    def enqueue_to_team(self, teacher: OrderedDict[str, torch.Tensor]):
-        self.weights_queue.append(teacher)
-        if len(self.weights_queue) > self.average_of:
-            self.weights_queue.pop(0)
-
-
-class TeacherCopyUpdate(TeacherUpdate):
-    def __init__(
-        self,
-        when: Literal["epoch", "batch"] = "epoch",
-        update_interval: int = 1,
-    ):
-        """Instant weights copy.
-
-        Parameters
-        ----------
-        when : Literal['epoch', 'batch'], optional
-            When should the update happen, by default "epoch"
-        update_interval : int, optional
-            Update will happen every 'update_interval' epochs/batches, by default 1
-        """
-
-        super().__init__(when=when)
-
-        self.update_interval = update_interval
-        self.last_weights = None
-
-    def _setup_initial(self, initial_model_w: OrderedDict[str, torch.Tensor]):
-        self.last_weights = initial_model_w
-
-    def _compute_teacher_weights(self) -> OrderedDict[str, torch.Tensor]:
-        return self.last_weights
-
-    def _teacher_update_state(
-        self, progress: int, current_model: pl.LightningModule
-    ) -> bool:
-        if progress % self.update_interval != 0:
-            return False
-
-        self.last_weights = current_model.state_dict()
-        return True
-
-
-class TeacherEmaUpdate(TeacherUpdate):
-    def __init__(
-        self,
-        when: Literal["epoch", "batch"] = "epoch",
-        update_interval: int = 1,
-        update_rate: float = 0.999,
-    ):
-        """Instant weights copy.
-
-        Parameters
-        ----------
-        when : Literal['epoch', 'batch'], optional
-            When should the update happen, by default "epoch"
-        update_interval : int, optional
-            Update will happen every 'update_interval' epochs/batches, by default 1
-        update_rate : float, optional
-            How much to keep of the old weights each update. 0=instant copy, 1=never update weights.
-        """
-
-        super().__init__(when=when)
-
-        if update_rate < 0.0 or update_rate > 1.0:
-            raise ValueError(
-                f"Illegal update rate value ({update_rate}), it should be in [0.0,1.0]"
-            )
-        if update_rate == 0.0:
-            warnings.warn(
-                "You are using an EMA update with 0.0 update rate, consider using a TeacherCopyUpdate instead."
-            )
-
-        self.update_interval = update_interval
-        self.update_rate = update_rate
-        self.teacher_weights = None
-
-    def _setup_initial(self, initial_model_w: OrderedDict[str, torch.Tensor]):
-        self.teacher_weights = initial_model_w
-
-    def _compute_teacher_weights(self) -> OrderedDict[str, torch.Tensor]:
-        return self.teacher_weights
-
-    def _teacher_update_state(
-        self, progress: int, current_model: pl.LightningModule
-    ) -> bool:
-        if progress % self.update_interval != 0:
-            return False
-
-        self.teacher_weights = get_decayed_weights(
-            teacher_w=self.teacher_weights,
-            student_w=current_model.state_dict(),
-            tau=self.update_rate,
-        )
-        return True
-
-
-class TeacherTeamUpdate(TeacherUpdate):
-    def __init__(
-        self,
-        when: Literal["epoch", "batch"],
-        update_interval: List[int],
-        weight_update_rate: List[float],
-    ):
-        """TeacherTeamUpdate callback.
-        Keeps in memory a "team" of teachers weights that gets updated at different interval and at a different rate (EMA).
-        The final teacher is the average of all these weights.
-
-        Parameters
-        ----------
-        when : Literal['epoch', 'batch'], optional
-            When the update is applied, by default 'epoch'
-        update_interval : List[int]
-            How frequently the teacher(s) are updated.
-        weight_update_rate : List[float]
-            How much of the old weights to keep: 0.0 means instant update, 1.0 means never update.
-        """
-        super().__init__(when=when)
-
-        if len(update_interval) != len(weight_update_rate):
-            raise ValueError(
-                "update_interval should be the same size as weight_update_rate"
-            )
-
-        self.update_interval = update_interval
-        self.weight_update_rate = weight_update_rate
-
-        # The weights of the team of teachers that will be averaged
-        self.team_weights: List[OrderedDict[str, torch.Tensor]] = []
-
-    def get_update_rate(self, index) -> float:
-        return self.weight_update_rate[index]
-
-    def _setup_initial(self, initial_model_w: OrderedDict[str, torch.Tensor]):
-        self.team_weights = [initial_model_w] * len(self.update_interval)
-
-    def _compute_teacher_weights(self) -> OrderedDict[str, torch.Tensor]:
-        return TeacherUpdate.get_averaged_weights(self.team_weights)
-
-    def _teacher_update_state(self, progress: int, model: pl.LightningModule) -> bool:
-        cache_dirty = False
-        # Check for each member of the ensemble if it needs to be updated
-        for i in range(len(self.update_interval)):
-            interval = self.update_interval[i]
-            if interval == 0 or progress % interval != 0:
-                continue
-
-            new_teacher_i_w = get_decayed_weights(
-                teacher_w=self.team_weights[i],
-                student_w=model.state_dict(),
-                tau=self.get_update_rate(i),
-            )
-            self.team_weights[i] = new_teacher_i_w
-            cache_dirty = True
-        return cache_dirty
+        # If a weight has changed, compute updated teacher weights, cache it, and assign it
+        if cache_dirty:
+            try:
+                new_teacher_w = self._compute_teacher_weights()
+                model.task.teacher.load_state_dict(new_teacher_w)
+            except AttributeError as err:
+                raise AttributeError(
+                    f"TeacherUpdate callback can't be applied on this model : {err}"
+                )
