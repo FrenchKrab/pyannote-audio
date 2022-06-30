@@ -204,7 +204,6 @@ class StitchAugmentation(BaseWaveformTransform):
             torch.rand(batch_size) * (self.cut_bound_high - self.cut_bound_low)
             + self.cut_bound_low
         )
-        print(cut_location_percent)
         self.transform_parameters["cut_location"] = cut_location_percent
         cut_location = (cut_location_percent * num_samples).int()
 
@@ -234,8 +233,6 @@ class StitchAugmentation(BaseWaveformTransform):
         num_speakers: torch.Tensor = torch.sum(torch.any(targets, dim=-2), dim=-1)
         max_num_speakers = self.max_num_speakers or torch.max(num_speakers)
 
-        print(f"num_speakers={num_speakers}")
-
         # randomize index of second sample, constrained by the fact that the
         # resulting mixture should have less than max_num_speakers
         self.transform_parameters["sample_idx"] = torch.arange(
@@ -246,7 +243,6 @@ class StitchAugmentation(BaseWaveformTransform):
             samples_with_n_speakers = torch.where(num_speakers == n)[0]
             num_samples_with_n_speakers = len(samples_with_n_speakers)
             if num_samples_with_n_speakers == 0:
-                print(f"No samples with {n} speakers ! Continuing ..")
                 continue
 
             # indices of candidate samples for mixing (i.e. samples that would)
@@ -308,10 +304,6 @@ class StitchAugmentation(BaseWaveformTransform):
             firsthalf_targets, _ = torch.sort(targets, descending=False)
             secondhalf_targets, _ = torch.sort(targets[idx], descending=True)
 
-            print(
-                f"targets; first={firsthalf_targets.shape} ; second={secondhalf_targets.shape}"
-            )
-
             batch_size, num_channels, num_frames, num_speakers = targets.shape
 
             # a tensor of same shape as targets, containing for each target the percentage it's associated with
@@ -326,7 +318,6 @@ class StitchAugmentation(BaseWaveformTransform):
                 .swapaxes(2, 3)
             )
 
-            # print(f"cut={cut_location_percent_expanded.shape}; lsps={linspaces.shape}")
             # get the masks
             firsthalf_mask = torch.where(
                 linspaces < cut_location_percent_expanded, 1, 0
@@ -340,10 +331,6 @@ class StitchAugmentation(BaseWaveformTransform):
                 + secondhalf_targets * secondhalf_mask
             )
 
-        print(f"{samples.shape};{targets.shape}")
-        print(
-            f"{mixed_samples.shape},{sample_rate},{mixed_targets.shape},{target_rate},"
-        )
         return ObjectDict(
             samples=mixed_samples,
             sample_rate=sample_rate,
@@ -378,10 +365,6 @@ def create_crossfade_tensors(
             torch.linspace(1.0, 0.0, out_stop - out_stop_begin) ** 2
         )
         fade_out[i, out_stop:] = 0.0
-
-        if i <= 1:
-            print(fade_in[i][in_start - 1 : in_start_end + 1])
-            print(fade_out[i][out_stop_begin - 1 : out_stop + 1])
     return fade_in, fade_out
 
 
