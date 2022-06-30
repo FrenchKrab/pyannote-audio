@@ -286,9 +286,10 @@ class StitchAugmentation(BaseWaveformTransform):
 
     def __init__(
         self,
-        embedder: PretrainedSpeakerEmbedding,
+        max_num_speakers: int,
+        embedder: PretrainedSpeakerEmbedding = None,
         fade_duration: float = 0.5,  # In seconds, how much time to transition a track from on->off or off->on
-        cut_margin: float = 0.25,  # In seconds, how much "extra time" to allocate around the cutting point
+        cut_margin: float = 0.0,  # In seconds, how much "extra time" to allocate around the cutting point
         cut_bound_low: float = 0.0,  # Minimum time (% of duration) at which the cut can occur
         cut_bound_high: float = 1.0,  # Maximum time (% of duration) at which the cut can occur
         min_snr_in_db: float = 0.0,
@@ -309,8 +310,9 @@ class StitchAugmentation(BaseWaveformTransform):
             target_rate=target_rate,
             output_type=output_type,
         )
+        self.max_num_speakers = max_num_speakers
         self.embedder = embedder
-        self.ease_time = fade_duration
+        self.fade_duration = fade_duration
         self.cut_margin = cut_margin
         self.cut_bound_low = cut_bound_low
         self.cut_bound_high = cut_bound_high
@@ -329,6 +331,7 @@ class StitchAugmentation(BaseWaveformTransform):
             torch.rand(batch_size) * (self.cut_bound_high - self.cut_bound_low)
             + self.cut_bound_low
         )
+        print(cut_location_percent)
         self.transform_parameters["cut_location"] = cut_location_percent
         cut_location = (cut_location_percent * num_samples).int()
 
@@ -342,17 +345,23 @@ class StitchAugmentation(BaseWaveformTransform):
 
         # Compute fade in/out tensors and store them
         fadein, fadeout = create_crossfade_tensors(
-            fadein_start, fadeout_stop, self.fade_duration * sample_rate, num_samples
+            fadein_start,
+            fadeout_stop,
+            int(self.fade_duration * sample_rate),
+            num_samples,
         )
         self.transform_parameters["fade_in"] = fadein
         self.transform_parameters["fade_out"] = fadeout
 
-        embeddings = self.embedder(samples)
-        similarity_mat = cos_sim(embeddings, embeddings)
+        if self.embedder is not None:
+            embeddings = self.embedder(samples)
+            similarity_mat = cos_sim(embeddings, embeddings)
 
         # count number of active speakers per sample
         num_speakers: torch.Tensor = torch.sum(torch.any(targets, dim=-2), dim=-1)
         max_num_speakers = self.max_num_speakers or torch.max(num_speakers)
+
+        print(f"num_speakers={num_speakers}")
 
         # randomize index of second sample, constrained by the fact that the
         # resulting mixture should have less than max_num_speakers
@@ -365,6 +374,7 @@ class StitchAugmentation(BaseWaveformTransform):
             samples_with_n_speakers = torch.where(num_speakers == n)[0]
             num_samples_with_n_speakers = len(samples_with_n_speakers)
             if num_samples_with_n_speakers == 0:
+                print(f"No samples with {n} speakers ! Continuing ..")
                 continue
 
             # indices of candidate samples for mixing (i.e. samples that would)
@@ -373,17 +383,26 @@ class StitchAugmentation(BaseWaveformTransform):
             if num_candidates == 0:
                 continue
 
-            # create a indexing array with all non candidates
-            non_candidates_indices = torch.ones(batch_size, dtype=bool)
-            non_candidates_indices[candidates] = False
+            if self.embedder is not None:
+                # create a indexing array with all non candidates
+                non_candidates_indices = torch.ones(batch_size, dtype=bool)
+                non_candidates_indices[candidates] = False
 
-            similarity_mat_n = similarity_mat[samples_with_n_speakers].clone()
-            similarity_mat_n.t()[
-                non_candidates_indices
-            ] = 1.0  # make non candidates have the worst possible value
-            most_different = torch.argmin(similarity_mat_n, dim=1)
-
-            selected_candidates = most_different
+                similarity_mat_n = similarity_mat[samples_with_n_speakers].clone()
+                similarity_mat_n.t()[
+                    non_candidates_indices
+                ] = 1.0  # make non candidates have the worst possible value
+                most_different = torch.argmin(similarity_mat_n, dim=1)
+                selected_candidates = most_different
+            else:
+                selected_candidates = candidates[
+                    torch.randint(
+                        0,
+                        num_candidates,
+                        (num_samples_with_n_speakers,),
+                        device=samples.device,
+                    )
+                ]
 
             self.transform_parameters["sample_idx"][
                 samples_with_n_speakers
@@ -399,35 +418,62 @@ class StitchAugmentation(BaseWaveformTransform):
 
         # snr = self.transform_parameters["snr_in_db"]
         idx = self.transform_parameters["sample_idx"]
-        fade_in = self.transform_parameters["fade_in"]
-        fade_out = self.transform_parameters["fade_out"]
-        # cut_location_percent = self.transform_parameters["cut_location"]
+        fade_in = self.transform_parameters["fade_in"].unsqueeze(1)
+        fade_out = self.transform_parameters["fade_out"].unsqueeze(1)
+
+        cut_location_percent = self.transform_parameters["cut_location"]
 
         # background_samples = Audio.rms_normalize(samples[idx])
         # background_rms = calculate_rms(samples) / (10 ** (snr.unsqueeze(dim=-1) / 20))
 
         # mixed_samples = samples + background_rms.unsqueeze(-1) * background_samples
+        print(
+            f"fadeout={fade_out.shape}; fadein={fade_in.shape}, samplesidx={samples[idx].shape}"
+        )
         mixed_samples = samples * fade_out + samples[idx] * fade_in
 
         if targets is None:
             mixed_targets = None
         else:
-            pass
-            # firsthalf_targets = targets
-            # secondhalf_targets = targets[idx]
+            firsthalf_targets, _ = torch.sort(targets, descending=False)
+            secondhalf_targets, _ = torch.sort(targets[idx], descending=True)
 
-            # TODO: this
-            # change code to only use 1 cut location for the whole batch ? Would simplify everything
+            print(
+                f"targets; first={firsthalf_targets.shape} ; second={secondhalf_targets.shape}"
+            )
 
-            # cut_location_targets = cut_location_percent * firsthalf_targets.shape[-2]
-            # firsthalf_mask = torch.ones_like(firsthalf_targets)
-            # firsthalf_mask[:,:,:]
+            batch_size, num_channels, num_frames, num_speakers = targets.shape
 
-            # mixed_targets = (
-            #     firsthalf_targets * firsthalf_mask
-            #     + secondhalf_targets * secondhalf_mask
-            # )
+            # a tensor of same shape as targets, containing for each target the percentage it's associated with
+            cut_location_percent_expanded = cut_location_percent.expand(
+                (num_speakers, num_channels, num_frames, batch_size)
+            ).swapaxes(0, 3)
 
+            # just lots of linspaces to compare the threshold to (same shape as targets)
+            linspaces = (
+                torch.linspace(0, 1, num_frames)
+                .tile(batch_size, num_channels, num_speakers, 1)
+                .swapaxes(2, 3)
+            )
+
+            # print(f"cut={cut_location_percent_expanded.shape}; lsps={linspaces.shape}")
+            # get the masks
+            firsthalf_mask = torch.where(
+                linspaces < cut_location_percent_expanded, 1, 0
+            )
+            secondhalf_mask = torch.where(
+                linspaces > cut_location_percent_expanded, 1, 0
+            )
+
+            mixed_targets = (
+                firsthalf_targets * firsthalf_mask
+                + secondhalf_targets * secondhalf_mask
+            )
+
+        print(f"{samples.shape};{targets.shape}")
+        print(
+            f"{mixed_samples.shape},{sample_rate},{mixed_targets.shape},{target_rate},"
+        )
         return ObjectDict(
             samples=mixed_samples,
             sample_rate=sample_rate,
@@ -450,15 +496,22 @@ def create_crossfade_tensors(
     for i in range(batch_size):
         in_start = fadein_start[i]
         out_stop = fadeout_stop[i]
-        fade_in[i, :in_start] = 0.0
-        fade_in[i, in_start : in_start + fade_duration] = (
-            torch.linspace(0.0, 1.0, fade_duration) ** 2
-        )
-        fade_out[i, out_stop - fade_duration : out_stop] = (
-            torch.linspace(1.0, 0.0, fade_duration) ** 2
-        )
-        fade_in[i, out_stop:] = 0.0
 
+        in_start_end = min(in_start + fade_duration, fade_in.shape[1])
+        out_stop_begin = max(0, out_stop - fade_duration)
+
+        fade_in[i, :in_start] = 0.0
+        fade_in[i, in_start:in_start_end] = (
+            torch.linspace(0.0, 1.0, in_start_end - in_start) ** 2
+        )
+        fade_out[i, out_stop_begin:out_stop] = (
+            torch.linspace(1.0, 0.0, out_stop - out_stop_begin) ** 2
+        )
+        fade_out[i, out_stop:] = 0.0
+
+        if i <= 1:
+            print(fade_in[i][in_start - 1 : in_start_end + 1])
+            print(fade_out[i][out_stop_begin - 1 : out_stop + 1])
     return fade_in, fade_out
 
 
