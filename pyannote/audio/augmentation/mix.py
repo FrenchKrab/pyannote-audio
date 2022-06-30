@@ -329,7 +329,7 @@ class StitchAugmentation(BaseWaveformTransform):
             mixed_targets = (
                 firsthalf_targets * firsthalf_mask
                 + secondhalf_targets * secondhalf_mask
-            )
+            ).type(targets.dtype)
 
         return ObjectDict(
             samples=mixed_samples,
