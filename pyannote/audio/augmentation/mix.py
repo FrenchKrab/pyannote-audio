@@ -165,12 +165,9 @@ class StitchAugmentation(BaseWaveformTransform):
         max_num_speakers: int,
         embedder: PretrainedSpeakerEmbedding = None,
         fade_duration: float = 0.5,  # In seconds, how much time to transition a track from on->off or off->on
-        cut_margin: float = 0.0,  # In seconds, how much "extra time" to allocate around the cutting point
+        cut_margin: float = 0.25,  # In seconds, how much "extra time" to allocate around the cutting point
         cut_bound_low: float = 0.0,  # Minimum time (% of duration) at which the cut can occur
         cut_bound_high: float = 1.0,  # Maximum time (% of duration) at which the cut can occur
-        min_snr_in_db: float = 0.0,
-        max_snr_in_db: float = 5.0,
-        mix_target: str = "union",
         mode: str = "per_example",
         p: float = 0.5,
         p_mode: str = None,
