@@ -168,6 +168,7 @@ class StitchAugmentation(BaseWaveformTransform):
         cut_margin: float = 0.25,  # In seconds, how much "extra time" to allocate around the cutting point
         cut_bound_low: float = 0.0,  # Minimum time (% of duration) at which the cut can occur
         cut_bound_high: float = 1.0,  # Maximum time (% of duration) at which the cut can occur
+        fade_power: float = 2,
         mode: str = "per_example",
         p: float = 0.5,
         p_mode: str = None,
@@ -189,6 +190,7 @@ class StitchAugmentation(BaseWaveformTransform):
         self.cut_margin = cut_margin
         self.cut_bound_low = cut_bound_low
         self.cut_bound_high = cut_bound_high
+        self.fade_power = fade_power
 
     def randomize_parameters(
         self,
@@ -201,22 +203,19 @@ class StitchAugmentation(BaseWaveformTransform):
         batch_size, num_channels, num_samples = samples.shape
 
         cut_location_percent = (
-            torch.rand(batch_size) * (self.cut_bound_high - self.cut_bound_low)
+            torch.rand(1) * (self.cut_bound_high - self.cut_bound_low)
             + self.cut_bound_low
-        )
+        ).item()
         self.transform_parameters["cut_location"] = cut_location_percent
-        cut_location = (cut_location_percent * num_samples).int()
+        cut_location = int(cut_location_percent * num_samples)
 
-        fadein_start = torch.max(
-            cut_location - self.cut_margin * sample_rate, torch.zeros(batch_size)
-        ).int()
-        fadeout_stop = torch.min(
-            cut_location + self.cut_margin * sample_rate,
-            torch.ones(batch_size) * num_samples,
-        ).int()
+        fadein_start = round(max(cut_location - self.cut_margin * sample_rate, 0))
+        fadeout_stop = round(
+            min(cut_location + self.cut_margin * sample_rate, num_samples)
+        )
 
         # Compute fade in/out tensors and store them
-        fadein, fadeout = create_crossfade_tensors(
+        fadein, fadeout = create_crossfade_tensor(
             fadein_start,
             fadeout_stop,
             int(self.fade_duration * sample_rate),
@@ -286,17 +285,14 @@ class StitchAugmentation(BaseWaveformTransform):
 
         # snr = self.transform_parameters["snr_in_db"]
         idx = self.transform_parameters["sample_idx"]
-        fade_in = self.transform_parameters["fade_in"].unsqueeze(1)
-        fade_out = self.transform_parameters["fade_out"].unsqueeze(1)
+        fade_in = self.transform_parameters["fade_in"]
+        fade_out = self.transform_parameters["fade_out"]
 
         cut_location_percent = self.transform_parameters["cut_location"]
 
-        # background_samples = Audio.rms_normalize(samples[idx])
-        # background_rms = calculate_rms(samples) / (10 ** (snr.unsqueeze(dim=-1) / 20))
-
-        # mixed_samples = samples + background_rms.unsqueeze(-1) * background_samples
-
-        mixed_samples = samples * fade_out + samples[idx] * fade_in
+        mixed_samples = samples * (fade_out**self.fade_power) + samples[idx] * (
+            fade_in * self.fade_power
+        )
 
         if targets is None:
             mixed_targets = None
@@ -306,30 +302,12 @@ class StitchAugmentation(BaseWaveformTransform):
 
             batch_size, num_channels, num_frames, num_speakers = targets.shape
 
-            # a tensor of same shape as targets, containing for each target the percentage it's associated with
-            cut_location_percent_expanded = cut_location_percent.expand(
-                (num_speakers, num_channels, num_frames, batch_size)
-            ).swapaxes(0, 3)
+            cut_location = round(cut_location_percent * num_frames)
 
-            # just lots of linspaces to compare the threshold to (same shape as targets)
-            linspaces = (
-                torch.linspace(0, 1, num_frames)
-                .tile(batch_size, num_channels, num_speakers, 1)
-                .swapaxes(2, 3)
-            )
-
-            # get the masks
-            firsthalf_mask = torch.where(
-                linspaces < cut_location_percent_expanded, 1, 0
-            )
-            secondhalf_mask = torch.where(
-                linspaces > cut_location_percent_expanded, 1, 0
-            )
-
-            mixed_targets = (
-                firsthalf_targets * firsthalf_mask
-                + secondhalf_targets * secondhalf_mask
-            ).type(targets.dtype)
+            mixed_targets = firsthalf_targets.clone()
+            mixed_targets[:, :, cut_location:, :] = secondhalf_targets[
+                :, :, cut_location:, :
+            ]
 
         return ObjectDict(
             samples=mixed_samples,
@@ -339,32 +317,30 @@ class StitchAugmentation(BaseWaveformTransform):
         )
 
 
-def create_crossfade_tensors(
-    fadein_start: torch.Tensor,
-    fadeout_stop: torch.Tensor,
+def create_crossfade_tensor(
+    fadein_start: int,
+    fadeout_stop: int,
     fade_duration: int,
     num_samples: int,
 ):
-    batch_size = fadein_start.shape[0]
+    fade_in = torch.ones(num_samples)
+    fade_out = torch.ones(num_samples)
 
-    fade_in = torch.ones(batch_size, num_samples)
-    fade_out = torch.ones(batch_size, num_samples)
+    in_start = fadein_start
+    out_stop = fadeout_stop
 
-    for i in range(batch_size):
-        in_start = fadein_start[i]
-        out_stop = fadeout_stop[i]
+    in_start_end = min(in_start + fade_duration, num_samples)
+    out_stop_begin = max(0, out_stop - fade_duration)
 
-        in_start_end = min(in_start + fade_duration, fade_in.shape[1])
-        out_stop_begin = max(0, out_stop - fade_duration)
+    fade_in[:in_start] = 0.0
+    fade_in[in_start:in_start_end] = (torch.linspace(0.0, 1.0, fade_duration))[
+        : in_start_end - in_start
+    ]
+    fade_out[out_stop_begin:out_stop] = (torch.linspace(1.0, 0.0, fade_duration))[
+        : out_stop - out_stop_begin
+    ]
+    fade_out[out_stop:] = 0.0
 
-        fade_in[i, :in_start] = 0.0
-        fade_in[i, in_start:in_start_end] = (
-            torch.linspace(0.0, 1.0, in_start_end - in_start) ** 2
-        )
-        fade_out[i, out_stop_begin:out_stop] = (
-            torch.linspace(1.0, 0.0, out_stop - out_stop_begin) ** 2
-        )
-        fade_out[i, out_stop:] = 0.0
     return fade_in, fade_out
 
 
