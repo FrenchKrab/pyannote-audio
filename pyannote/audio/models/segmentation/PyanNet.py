@@ -130,7 +130,9 @@ class PyanNet(Model):
             [
                 nn.Linear(in_features, out_features)
                 for in_features, out_features in pairwise(
-                    [lstm_out_features,]
+                    [
+                        lstm_out_features,
+                    ]
                     + [self.hparams.linear["hidden_size"]]
                     * self.hparams.linear["num_layers"]
                 )

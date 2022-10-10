@@ -126,7 +126,10 @@ class SpeakerSegmentation(SpeakerDiarizationMixin, Pipeline):
 
             if not (self.skip_stitching or self.skip_conversion):
                 parameters.update(
-                    {"min_duration_on": 0.0, "min_duration_off": 0.0,}
+                    {
+                        "min_duration_on": 0.0,
+                        "min_duration_off": 0.0,
+                    }
                 )
 
             return parameters
@@ -140,7 +143,7 @@ class SpeakerSegmentation(SpeakerDiarizationMixin, Pipeline):
         segmentations: SlidingWindowFeature, onset: float = 0.5
     ) -> nx.Graph:
         """Build stitching graph
-        
+
         Parameters
         ----------
         segmentations : (num_chunks, num_frames, local_num_speakers)-shaped SlidingWindowFeature
@@ -349,4 +352,3 @@ class SpeakerSegmentation(SpeakerDiarizationMixin, Pipeline):
             )
 
         return SlidingDiarizationErrorRate(window=2.0 * self._segmentation.duration)
-
