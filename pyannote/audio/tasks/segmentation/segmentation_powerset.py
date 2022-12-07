@@ -49,7 +49,7 @@ from pyannote.audio.utils.loss import binary_cross_entropy, mse_loss, nll_loss
 from pyannote.audio.utils.permutation import permutate
 
 
-class SegmentationMonolabel(SegmentationTaskMixin, Task):
+class SegmentationPowerset(SegmentationTaskMixin, Task):
     """Speaker segmentation
 
     Parameters
