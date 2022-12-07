@@ -471,7 +471,6 @@ class SegmentationTaskMixin:
         y = y.float().cpu().numpy()
         if self.specifications.problem == Problem.POWERSET:
             y_pred = y_pred_powerset.cpu().numpy()
-            y = permutated_y.cpu().numpy()
         else:
             y_pred = y_pred.cpu().numpy()
 
