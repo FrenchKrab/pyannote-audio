@@ -50,7 +50,7 @@ from pyannote.audio.utils.permutation import permutate
 
 
 class SegmentationPowerset(SegmentationTaskMixin, Task):
-    """Speaker segmentation
+    """Speaker segmentation using a power set encoding of active speakers.
 
     Parameters
     ----------
@@ -60,6 +60,10 @@ class SegmentationPowerset(SegmentationTaskMixin, Task):
         Maximum number of speakers per chunk (must be at least 2).
     max_simultaneous_speakers : int
         Maximum number of simultaneous speakers per frame.
+        Limits the maximum cardinality of the subsets of all speakers,
+        setting it to max_num_speakers result in the "true" power set encoding
+        (= all possible speaker combinations have a class).
+        Must be in [1, max_num_speakers].
     duration : float, optional
         Chunks duration. Defaults to 2s.
     warm_up : float or (float, float), optional
