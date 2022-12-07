@@ -439,7 +439,7 @@ class SegmentationTaskMixin:
         seg_target = None
         seg_pred = None
         if self.specifications.problem == Problem.POWERSET:
-            permutated_y, _ = permutate(y_pred_powerset, y)
+            permutated_y, _ = permutate(y_pred, y)
             seg_target = self.multilabel_to_powerset(permutated_y)
             seg_pred = y_pred_powerset
         elif self.specifications.problem == Problem.MULTI_LABEL_CLASSIFICATION:
