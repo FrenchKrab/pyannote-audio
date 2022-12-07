@@ -363,10 +363,10 @@ class SegmentationTaskMixin:
         # if it's a powerset problem, transform the output into a multilabel (multihot) one
         if self.specifications.problem == Problem.POWERSET:
             y_pred_powerset = y_pred
-            pred_one_hot = torch.nn.functional.one_hot(
-                torch.argmax(preds, dim=-1), num_classes=preds.shape[-1]
+            y_pred_one_hot = torch.nn.functional.one_hot(
+                torch.argmax(y_pred, dim=-1), num_classes=y_pred.shape[-1]
             )
-            y_pred = self.specifications.powerset_to_multilabel(pred_one_hot)
+            y_pred = self.specifications.powerset_to_multilabel(y_pred_one_hot)
 
         batch_size, num_frames, _ = y_pred.shape
         # y_pred = (batch_size, num_frames, num_classes)
