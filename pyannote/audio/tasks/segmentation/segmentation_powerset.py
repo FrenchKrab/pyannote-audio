@@ -448,14 +448,6 @@ class SegmentationPowerset(SegmentationTaskMixin, Task):
         )
 
 
-def mono_nll_loss(target, preds):
-    return torch.nn.functional.nll_loss(preds.float(), torch.argmax(target, dim=-1))
-
-
-def mono_mse_loss(target, preds):
-    return torch.nn.functional.mse_loss(preds, target)
-
-
 def main(protocol: str, subset: str = "test", model: str = "pyannote/segmentation"):
     """Evaluate a segmentation model"""
 
