@@ -207,7 +207,7 @@ class SegmentationPowerset(SegmentationTaskMixin, Task):
 
         Parameters
         ----------
-        permutated_prediction : (batch_size, num_frames, num_classes_mono) torch.Tensor
+        permutated_prediction : (batch_size, num_frames, num_classes_powerset) torch.Tensor
             Permutated speaker activity predictions.
         target : (batch_size, num_frames, num_speakers) torch.Tensor
             Speaker activity.
@@ -329,7 +329,7 @@ class SegmentationPowerset(SegmentationTaskMixin, Task):
         one_hot_prediction_multi = self.powerset_to_multilabel(one_hot_prediction)
 
         permutated_target, _ = permutate(one_hot_prediction_multi, target)
-        permutated_target_mono = self.multilabel_to_powerset(permutated_target)
+        permutated_target_powerset = self.multilabel_to_powerset(permutated_target)
 
         # frames weight
         weight_key = getattr(self, "weight", None)
@@ -346,7 +346,7 @@ class SegmentationPowerset(SegmentationTaskMixin, Task):
         weight[:, num_frames - warm_up_right :] = 0.0
 
         seg_loss = self.segmentation_loss(
-            prediction, permutated_target_mono, weight=weight
+            prediction, permutated_target_powerset, weight=weight
         )
 
         self.model.log(
@@ -363,7 +363,7 @@ class SegmentationPowerset(SegmentationTaskMixin, Task):
 
         else:
             vad_loss = self.voice_activity_detection_loss(
-                prediction, permutated_target_mono, weight=weight
+                prediction, permutated_target_powerset, weight=weight
             )
 
             self.model.log(
@@ -422,20 +422,20 @@ class SegmentationPowerset(SegmentationTaskMixin, Task):
         super().setup_loss_func()
 
     @property
-    def mono_to_multi_tensor(self):
+    def powerset_conversion_tensor(self):
         return self.model.powerset_conversion_tensor
 
     # Powerset <-> multilabel problem conversion helpers (using cached conversion tensor !)
     def multilabel_to_powerset(self, t: torch.Tensor) -> torch.Tensor:
         return self.specifications.multilabel_to_powerset(
             t,
-            self.mono_to_multi_tensor,
+            self.powerset_conversion_tensor,
         )
 
     def powerset_to_multilabel(self, t: torch.Tensor) -> torch.Tensor:
         return self.specifications.powerset_to_multilabel(
             t,
-            self.mono_to_multi_tensor,
+            self.powerset_conversion_tensor,
         )
 
     def convert_to_powerset_permutation(self, permutation: torch.Tensor):
