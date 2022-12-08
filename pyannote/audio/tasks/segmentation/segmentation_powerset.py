@@ -425,7 +425,7 @@ class SegmentationPowerset(SegmentationTaskMixin, Task):
     def mono_to_multi_tensor(self):
         return self.model.powerset_conversion_tensor
 
-    # Monolabel <-> multilabel problem conversion helpers (using cached conversion tensor !)
+    # Powerset <-> multilabel problem conversion helpers (using cached conversion tensor !)
     def multilabel_to_powerset(self, t: torch.Tensor) -> torch.Tensor:
         return self.specifications.multilabel_to_powerset(
             t,
