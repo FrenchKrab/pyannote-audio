@@ -325,7 +325,7 @@ class UnsupervisedSegmentation(Segmentation, Task):
             if batch_idx == 0:
                 self._val_confidences = []
             
-            _, outs = self.get_teacher_outputs_passes(batch["X"][:,:,:], None)
+            _, outs = self.get_teacher_outputs_passes(batch["X"].to(self.teacher.device), None)
             out = outs[0] # first fw pass, first (only) batch element
             out_probas = out.exp()
             sorted_out_probas = out_probas.sort(axis=-1)[0]     # sorted from less confident to more confident
