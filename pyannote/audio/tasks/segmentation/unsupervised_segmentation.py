@@ -292,6 +292,8 @@ class UnsupervisedSegmentation(Segmentation, Task):
                 return weight * sorted_out_probas[:,:,-2:-1]
             elif self.loss_confidence_weighting == "probdelta":
                 return weight * (sorted_out_probas[:,:,-1] - sorted_out_probas[:,:,-2])[:,:,None]
+            else:
+                raise RuntimeError("Unsupported confidence estimation")
         return weight
 
     # TODO: tmp: keep or clean
@@ -308,7 +310,8 @@ class UnsupervisedSegmentation(Segmentation, Task):
                     confidence = sorted_out_probas[:,-2:-1].mean(axis=0)
                 elif self.filter_confidence == "probdelta":
                     confidence = (sorted_out_probas[:,-1] - sorted_out_probas[:,-2]).mean(axis=0)
-
+                else:
+                    raise RuntimeError("Unsupported confidence estimation")
 
                 if self.filter_confidence_mode == "absolute" and confidence > self.filter_confidence_threshold:
                     yield chunk
