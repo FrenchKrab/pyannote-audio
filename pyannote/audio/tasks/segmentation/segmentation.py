@@ -338,6 +338,10 @@ class Segmentation(SegmentationTaskMixin, Task):
 
         return loss
 
+    # TODO: tmp: remove this or refactor if it's useful
+    def training_step_loss_weighting(self, batch, weight):
+        return weight
+
     def training_step(self, batch, batch_idx: int):
         """Compute permutation-invariant segmentation loss
 
@@ -400,6 +404,9 @@ class Segmentation(SegmentationTaskMixin, Task):
         weight[:, :warm_up_left] = 0.0
         warm_up_right = round(self.warm_up[1] / self.duration * num_frames)
         weight[:, num_frames - warm_up_right :] = 0.0
+
+        # eventual additional logic on weight
+        weight = self.training_step_loss_weighting(batch, weight)
 
         if self.specifications.powerset:
 

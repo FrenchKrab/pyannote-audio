@@ -36,6 +36,10 @@ class UnsupervisedSegmentation(Segmentation, Task):
         teacher: Model,  # unsupervised param: model to use to generate truth
         use_pseudolabels: bool = True,  # generate pseudolabels in training mode
         augmentation_teacher: BaseWaveformTransform = None,
+        loss_confidence_weighting: Optional[Literal['maxprob', 'probdelta']] = None,
+        filter_confidence: Optional[Literal['maxprob', 'probdelta']] = None,
+        filter_confidence_threshold: Optional[float] = None,
+        filter_confidence_mode: Optional[Literal['absolute', 'quantile']] = None,
         pl_fw_passes: int = 1,  # how many forward passes to average to get the pseudolabels
         pl_postprocess: List[PseudoLabelPostprocess] = None,
         # supervised params
@@ -140,6 +144,7 @@ class UnsupervisedSegmentation(Segmentation, Task):
             )
 
         self.teacher = teacher
+        teacher_specs = self.teacher.specifications
         self.use_pseudolabels = use_pseudolabels
         self.augmentation_teacher = augmentation_teacher
         self.pl_fw_passes = pl_fw_passes
@@ -148,8 +153,22 @@ class UnsupervisedSegmentation(Segmentation, Task):
             for pp in self.pl_postprocess:
                 pp.setup(self.protocol, self, self.teacher)
 
+        if loss_confidence_weighting not in [None, 'maxprob', 'probdelta']:
+            raise ValueError(f"unknown confidence estimation : {loss_confidence_weighting}")
+        if loss_confidence_weighting is not None and not teacher_specs.powerset:
+            raise ValueError("loss confidence weighting is only compatible with powerset models")
+        self.loss_confidence_weighting = loss_confidence_weighting
+
+        if filter_confidence not in [None, 'maxprob', 'probdelta']:
+            raise ValueError(f"unknown confidence estimation : {filter_confidence}")
+        if filter_confidence is not None and not teacher_specs.powerset:
+            raise ValueError("confidence filtering is only compatible with powerset models")
+        self.filter_confidence = filter_confidence
+        self.filter_confidence_threshold = filter_confidence_threshold
+        self.filter_confidence_mode = filter_confidence_mode
+        self.discarded_percent = None   # not very clean
+
         self.teacher.eval()
-        teacher_specs = self.teacher.specifications
         if teacher_specs.powerset:
             self._powerset = Powerset(
                 len(teacher_specs.classes), teacher_specs.powerset_max_classes
@@ -239,6 +258,7 @@ class UnsupervisedSegmentation(Segmentation, Task):
             pseudo_y, model_out_passes = self.get_teacher_outputs_passes(
                 x=x, aug=self.augmentation_teacher, fw_passes=self.pl_fw_passes
             )
+            collated_batch["teacher_out"] = model_out_passes[0]
             if self.pl_postprocess is not None:
                 processed_x, processed_pseudo_y = collated_batch["X"], pseudo_y
                 for pp in self.pl_postprocess:
@@ -261,6 +281,68 @@ class UnsupervisedSegmentation(Segmentation, Task):
             collated_batch["y"] = augmented.targets.squeeze(1)
 
         return collated_batch
+
+    # TODO: tmp: keep or clean
+    def training_step_loss_weighting(self, batch, weight):
+        weight = super().training_step_loss_weighting(batch, weight)
+        if self.loss_confidence_weighting is not None and "teacher_out" in batch:
+            out_probas = batch["teacher_out"].exp()
+            sorted_out_probas = out_probas.sort(axis=-1)[0]     # sorted from less confident to more confident
+            if self.loss_confidence_weighting == "maxprob":
+                return weight * sorted_out_probas[:,:,-2:-1]
+            elif self.loss_confidence_weighting == "deltaprob":
+                return weight * (sorted_out_probas[:,:,-1] - sorted_out_probas[:,:,-2])[:,:,None]
+        return weight
+
+    # TODO: tmp: keep or clean
+    def train__iter__(self):
+
+        for chunk in super().train__iter__():
+            if self.filter_confidence is not None:
+
+                _, outs = self.get_teacher_outputs_passes(chunk["X"][None,:,:], None)
+                out = outs[0,0] # first fw pass, first (only) batch element
+                out_probas = out.exp()
+                sorted_out_probas = out_probas.sort(axis=-1)[0]     # sorted from less confident to more confident
+                if self.filter_confidence == "maxprob":
+                    confidence = sorted_out_probas[:,-2:-1].mean(axis=0)
+                elif self.filter_confidence == "probdelta":
+                    confidence = (sorted_out_probas[:,-1] - sorted_out_probas[:,-2]).mean(axis=0)
+
+
+                if self.filter_confidence_mode == "absolute" and confidence > self.filter_confidence_threshold:
+                    yield chunk
+                elif self.filter_confidence_mode == "quantile" and confidence > self._confidence_quantile_value:
+                    yield chunk
+
+            else:
+                yield chunk
+
+    def validation_step(self, batch, batch_idx: int):
+        super().validation_step(batch, batch_idx)
+
+        if self.filter_confidence_mode == "quantile":
+            if batch_idx == 0:
+                self._val_confidences = []
+            
+            _, outs = self.get_teacher_outputs_passes(batch["X"][:,:,:], None)
+            out = outs[0] # first fw pass, first (only) batch element
+            out_probas = out.exp()
+            sorted_out_probas = out_probas.sort(axis=-1)[0]     # sorted from less confident to more confident
+            if self.filter_confidence == "maxprob":
+                confidence = sorted_out_probas[:,-2:-1].mean(axis=1)
+            elif self.filter_confidence == "probdelta":
+                confidence = (sorted_out_probas[:,:,-1] - sorted_out_probas[:,:,-2]).mean(axis=1)
+            
+            self._val_confidences.append(confidence)
+
+
+    def validation_epoch_end(self, outputs):
+        if self.filter_confidence_mode == "quantile":
+            confidences = torch.cat(self._val_confidences)
+            self._confidence_quantile_value = confidences.quantile(self.filter_confidence_threshold)
+            print(f"confidence quantile estimated : {self._confidence_quantile_value};  out of {confidences.shape[0]} values")
+
 
 
 class TeacherEmaUpdate(Callback):
