@@ -290,7 +290,7 @@ class UnsupervisedSegmentation(Segmentation, Task):
             sorted_out_probas = out_probas.sort(axis=-1)[0]     # sorted from less confident to more confident
             if self.loss_confidence_weighting == "maxprob":
                 return weight * sorted_out_probas[:,:,-2:-1]
-            elif self.loss_confidence_weighting == "deltaprob":
+            elif self.loss_confidence_weighting == "probdelta":
                 return weight * (sorted_out_probas[:,:,-1] - sorted_out_probas[:,:,-2])[:,:,None]
         return weight
 
