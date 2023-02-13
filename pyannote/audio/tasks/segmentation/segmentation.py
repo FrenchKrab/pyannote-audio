@@ -712,27 +712,6 @@ class Segmentation(SegmentationTaskMixin, Task):
 
         plt.close(fig)
 
-    @property
-    def val_monitor(self):
-        """Quantity (and direction) to monitor
-
-        Useful for model checkpointing or early stopping.
-
-        Returns
-        -------
-        monitor : str
-            Name of quantity to monitor (validation loss)
-        mode : {'min', 'max}
-            Minimize
-
-        See also
-        --------
-        pytorch_lightning.callbacks.ModelCheckpoint
-        pytorch_lightning.callbacks.EarlyStopping
-        """
-
-        return f"{self.logging_prefix}ValLoss", "min"
-
 
 def main(protocol: str, subset: str = "test", model: str = "pyannote/segmentation"):
     """Evaluate a segmentation model"""
