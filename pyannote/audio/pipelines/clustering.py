@@ -429,7 +429,7 @@ class AgglomerativeClustering(BaseClustering):
             constrained_assignment=constrained_assignment,
         )
 
-        self.threshold = Uniform(0.0, 2.0)  # assume unit-normalized embeddings
+        self.threshold = Uniform(0.5, 1.0)  # assume unit-normalized embeddings
         self.method = Categorical(
             ["average", "centroid", "complete", "median", "single", "ward", "weighted"]
         )
