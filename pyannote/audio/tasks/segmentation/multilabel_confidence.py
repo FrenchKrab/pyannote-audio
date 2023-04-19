@@ -29,7 +29,7 @@ from pyannote.core import Segment, SlidingWindow, SlidingWindowFeature
 from pyannote.database import Protocol
 from pyannote.database.protocol import SegmentationProtocol
 from torch_audiomentations.core.transforms_interface import BaseWaveformTransform
-from torchmetrics import Metric
+from torchmetrics import Metric, CalibrationError
 
 from pyannote.audio.tasks import MultiLabelSegmentation
 from pyannote.audio.core.task import Problem, Resolution, Specifications
@@ -191,6 +191,21 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         loss = loss_l + loss_c
 
 
+
+        if self.model.val_confidence_metric is not None:
+            self.model.val_confidence_metric(
+                y_confidence.reshape((-1,y_pred.shape[-1])).squeeze(),
+                (y_true==y_pred.mul(2).int().float()).reshape((-1,y_pred.shape[-1])).squeeze()
+            )
+            self.model.log(
+                f"{self.logging_prefix}BinaryCalibrationErrorPrediction",
+                self.model.val_confidence_metric,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+            )
+
         self.model.validation_metric(
             y_pred.reshape((-1,y_pred.shape[-1])).squeeze(),
             y_true.reshape((-1,y_pred.shape[-1])).squeeze()
@@ -237,6 +252,20 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
             logger=True,
         )
         return {"loss": loss_real_bce}
+
+    def setup_validation_metric(self):
+        super().setup_validation_metric()
+
+        classes = None
+        if self.classes is not None:
+            classes = self.classes
+        else:
+            classes = self.protocol.stats()["labels"].keys() 
+
+        if len(classes) == 1:
+            self.model.val_confidence_metric = CalibrationError("binary", norm="l1")
+        else:
+            self.model.val_confidence_metric = None
 
 
     @property
