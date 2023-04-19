@@ -29,7 +29,7 @@ from pyannote.core import Segment, SlidingWindow, SlidingWindowFeature
 from pyannote.database import Protocol
 from pyannote.database.protocol import SegmentationProtocol
 from torch_audiomentations.core.transforms_interface import BaseWaveformTransform
-from torchmetrics import F1Score, Metric, Precision, Recall
+from torchmetrics import CalibrationError, F1Score, Metric, Precision, Recall
 
 from pyannote.audio.core.task import Problem, Resolution, Specifications, Task
 from pyannote.audio.tasks.segmentation.mixins import SegmentationTaskMixin
@@ -251,7 +251,11 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
         y_true = y_true[mask]
         loss = F.binary_cross_entropy(y_pred, y_true.type(torch.float))
 
-        self.model.validation_metric(y_pred,y_true)
+
+        self.model.validation_metric(
+            y_pred.reshape((-1,y_pred.shape[-1])).squeeze(),
+            y_true.reshape((-1,y_pred.shape[-1])).squeeze()
+        )
 
         self.model.log_dict(
             self.model.validation_metric,
@@ -283,11 +287,16 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
 
         if classes is not None:
             classification_type = "multilabel" if len(classes) > 1 else "binary"
-            return [
+            metrics = [
                 F1Score(task=classification_type, num_labels=len(classes)),
                 Precision(task=classification_type, num_labels=len(classes)),
                 Recall(task=classification_type, num_labels=len(classes)),
             ]
+            if classification_type == "binary":
+                metrics += [
+                    CalibrationError(task="binary", norm="l1")
+                ]
+            return metrics
         else:
             return []
 

@@ -190,6 +190,20 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         loss_c = -torch.log(y_confidence).mean()
         loss = loss_l + loss_c
 
+
+        self.model.validation_metric(
+            y_pred.reshape((-1,y_pred.shape[-1])).squeeze(),
+            y_true.reshape((-1,y_pred.shape[-1])).squeeze()
+        )
+
+        self.model.log_dict(
+            self.model.validation_metric,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+        )
+
         self.model.log(
             f"{self.logging_prefix}ValLoss",
             loss,
