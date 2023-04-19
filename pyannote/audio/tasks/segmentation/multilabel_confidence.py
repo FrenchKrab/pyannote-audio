@@ -222,8 +222,9 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
             prog_bar=True,
             logger=True,
         )
-        return {"loss": loss}
-    
+        return {"loss": loss_real_bce}
+
+
     @property
     def val_monitor(self):
         """Quantity (and direction) to monitor
