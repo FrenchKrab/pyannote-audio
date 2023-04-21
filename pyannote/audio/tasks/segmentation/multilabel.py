@@ -331,6 +331,7 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
             F1Score(task="binary"),
             Precision(task="binary"),
             Recall(task="binary"),
+            CalibrationError(task="binary"),
         ]
 
     @cached_property

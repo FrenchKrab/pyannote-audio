@@ -253,13 +253,6 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         )
         return {"loss": loss_real_bce}
 
-    def default_metric_classwise(self) -> Union[Metric, Sequence[Metric], Dict[str, Metric]]:
-        metrics = super().default_metric_classwise()
-        metrics += [
-            CalibrationError(task="binary"),
-        ]
-        return metrics
-
     def setup_validation_metric(self):
         super().setup_validation_metric()
 
