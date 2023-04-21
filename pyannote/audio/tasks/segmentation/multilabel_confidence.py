@@ -253,16 +253,19 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         )
         return {"loss": loss_real_bce}
 
+    def default_metric_per_class(self) -> Union[Metric, Sequence[Metric], Dict[str, Metric]]:
+        metrics = super().default_metric_per_class()
+        metrics += [
+            CalibrationError(task="binary"),
+        ]
+        return metrics
+
     def setup_validation_metric(self):
         super().setup_validation_metric()
 
-        classes = None
-        if self.classes is not None:
-            classes = self.classes
-        else:
-            classes = self.protocol.stats()["labels"].keys() 
+        classes = self.classes
 
-        if len(classes) == 1:
+        if classes is not None and len(classes) == 1:
             self.model.val_confidence_metric = CalibrationError("binary", norm="l1")
         else:
             self.model.val_confidence_metric = None
