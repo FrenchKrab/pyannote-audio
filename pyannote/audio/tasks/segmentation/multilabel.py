@@ -321,7 +321,7 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
                 Recall(task="binary"),
             ]
         else:
-            # This case is handled by the per-class metric, see 'default_metric_per_class'
+            # This case is handled by the per-class metric, see 'default_metric_classwise'
             return None
 
     def default_metric_classwise(
