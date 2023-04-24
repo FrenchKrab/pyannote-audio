@@ -268,16 +268,11 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         )
         return {"loss": loss_real_bce}
 
+
     def setup_validation_metric(self):
         super().setup_validation_metric()
 
-        classes = self.classes
-
-        if classes is not None and len(classes) == 1:
-            self.model.val_confidence_metric = CalibrationError("binary", norm="l1")
-        else:
-            self.model.val_confidence_metric = None
-
+        self.model.val_confidence_metric = CalibrationError("binary", norm="l1")
 
     @property
     def val_monitor(self):
