@@ -33,6 +33,7 @@ from torchmetrics import Metric, CalibrationError
 
 from pyannote.audio.tasks import MultiLabelSegmentation
 from pyannote.audio.core.task import Problem, Resolution, Specifications
+from pyannote.audio.tasks.segmentation.multilabel import Loggable
 
 
 class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
@@ -96,6 +97,7 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         pin_memory: bool = False,
         augmentation: BaseWaveformTransform = None,
         metric: Union[Metric, Sequence[Metric], Dict[str, Metric]] = None,
+        loggables: List[Loggable] = None,
     ):
 
         if not isinstance(protocol, SegmentationProtocol):
@@ -114,7 +116,8 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
             metric=metric,
             balance=balance,
             weight=weight,
-            classes=classes
+            classes=classes,
+            loggables=loggables,
         )
 
         self.budget = budget
@@ -180,8 +183,8 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
 
         # mask (frame, class) index for which label is missing
         mask: torch.Tensor = y_true != -1
-        y_pred = y_pred[mask].reshape(y_pred.shape)
-        y_true = y_true[mask].reshape(y_true.shape)
+        y_pred_labelled = y_pred[mask]
+        y_true_labelled = y_true[mask]
         
         y_pred_cheated = y_confidence * y_pred + (1-y_confidence) * y_true 
 
@@ -191,6 +194,18 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         loss = loss_l + loss_c
 
 
+        loggable_data = {
+            "X": X,
+            "y_pred": y_pred_labelled,
+            "y_true": y_true_labelled,
+            "y_conf": y_confidence,
+        }
+        for loggable in self.loggables:
+            if loggable.update_in == "val":
+                loggable.update(loggable_data)
+            if loggable.compute_on == "step":
+                loggable.log(self.model.loggers, self.model.current_epoch, batch_idx)
+                loggable.clear()
 
         if self.model.val_confidence_metric is not None:
             self.model.val_confidence_metric(

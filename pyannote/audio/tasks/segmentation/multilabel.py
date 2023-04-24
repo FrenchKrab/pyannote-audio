@@ -383,28 +383,6 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
             if loggable.compute_on == "step":
                 loggable.log(self.model.loggers, self.model.current_epoch, batch_idx)
                 loggable.clear()
-        # if batch_idx == 0:
-        #     for logger in self.model.loggers:
-        #         if isinstance(logger, TensorBoardLogger):
-        #             experiment: SummaryWriter = logger.experiment
-
-        #             bins = torch.linspace(0, 1, 15 + 1)
-        #             values = torch.rand(50000)
-        #             hist, _ = torch.histogram(values, bins=bins, density=False)
-        #             sum_sq = values.dot(values)
-
-        #             experiment.add_histogram_raw(
-        #                 f"{self.logging_prefix}HistogramTest",
-        #                 min=values.min(),
-        #                 max=values.max(),
-        #                 num=len(values),
-        #                 sum=values.sum(),
-        #                 sum_squares=sum_sq,
-        #                 bucket_limits=bins[1:],
-        #                 bucket_counts=hist,
-        #                 global_step=self.model.current_epoch,
-        #             )
-        #             print("logged histogram :D")
 
         # log metrics per class
         for class_id, class_name in enumerate(self.classes):
@@ -441,7 +419,6 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
 
     def on_validation_end(self):
         super().on_validation_end()
-        print("on_validation_end :D")
         for loggable in self.loggables:
             if loggable.compute_on == "epoch":
                 loggable.log(self.model.loggers, self.model.current_epoch, -1)
