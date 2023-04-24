@@ -97,6 +97,7 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         pin_memory: bool = False,
         augmentation: BaseWaveformTransform = None,
         metric: Union[Metric, Sequence[Metric], Dict[str, Metric]] = None,
+        metric_classwise: Union[Metric, Sequence[Metric], Dict[str, Metric]] = None,
         loggables: List[Loggable] = None,
     ):
 
@@ -114,6 +115,7 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
             pin_memory=pin_memory,
             augmentation=augmentation,
             metric=metric,
+            metric_classwise=metric_classwise,
             balance=balance,
             weight=weight,
             classes=classes,
@@ -193,7 +195,7 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         loss_c = -torch.log(y_confidence).mean()
         loss = loss_l + loss_c
 
-
+        # log loggables
         loggable_data = {
             "X": X,
             "y_pred": y_pred_labelled,
@@ -207,6 +209,30 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
                 loggable.log(self.model.loggers, self.model.current_epoch, batch_idx)
                 loggable.clear()
 
+        # log metrics per class
+        for class_id, class_name in enumerate(self.classes):
+            mask: torch.Tensor = y_true[..., class_id] != -1
+            if mask.sum() == 0:
+                continue
+
+            y_pred_labelled = y_pred[..., class_id][mask]
+            y_true_labelled = y_true[..., class_id][mask]
+
+            metric = self.model.validation_metric_classwise[class_name]
+            metric(
+                y_pred_labelled,
+                y_true_labelled,
+            )
+
+            self.model.log_dict(
+                metric,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+            )
+
+        # log val confidence
         if self.model.val_confidence_metric is not None:
             self.model.val_confidence_metric(
                 y_confidence.reshape((-1,y_pred.shape[-1])).squeeze(),
