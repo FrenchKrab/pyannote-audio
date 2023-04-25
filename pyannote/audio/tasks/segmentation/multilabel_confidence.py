@@ -151,11 +151,6 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         loss_c = -torch.log(y_confidence).mean()
         loss = loss_l + self.lmbda * loss_c
 
-        if self.budget > loss_c:
-            self.lmbda /= 1.01
-        else:
-            self.lmbda /= 0.99
-
         self.model.log(
             f"{self.logging_prefix}TrainLoss",
             loss,
@@ -164,6 +159,39 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
             prog_bar=True,
             logger=True,
         )
+
+        self.model.log(
+            f"{self.logging_prefix}TrainLossCheatedBCE",
+            loss_l,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+        )
+
+        self.model.log(
+            f"{self.logging_prefix}TrainLossConfidence",
+            loss_l,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+        )
+
+        self.model.log(
+            f"{self.logging_prefix}TrainLambda",
+            loss,
+            on_step=True,
+            on_epoch=False,
+            prog_bar=True,
+            logger=True,
+        )
+
+        if self.budget > loss_c:
+            self.lmbda /= 1.01
+        else:
+            self.lmbda /= 0.99
+
         return {"loss": loss}
 
     def validation_step(self, batch, batch_idx: int):
@@ -174,6 +202,7 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         y_pred = model_output[:,:,:-1]
         y_true = batch["y"]
         y_confidence = model_output[:,:,-1:]
+        print(f"{y_pred.shape=}{y_true.shape=}")
         assert y_pred.shape == y_true.shape
 
         # TODO: add support for frame weights
