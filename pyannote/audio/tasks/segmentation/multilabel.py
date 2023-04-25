@@ -96,7 +96,7 @@ class LoggableHistogram(Loggable):
 
     def update(self, data):
         values = self._get_values(data).flatten()
-        hist, _ = torch.histogram(values.float(), bins=self.bins, density=False)
+        hist, _ = torch.histogram(values.float().cpu(), bins=self.bins, density=False)
         self.num += len(values)
         self.totals += hist
         self.min = min(self.min, values.min().item())
