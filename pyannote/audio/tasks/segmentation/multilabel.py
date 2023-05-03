@@ -171,8 +171,12 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
         torch_audiomentations waveform transform, used by dataloader
         during training.
     metric : optional
-        Validation metric(s). Can be anything supported by torchmetrics.MetricCollection.
-        Defaults to AUROC (area under the ROC curve).
+        Multilabel validation metric(s). Can be anything supported by torchmetrics.MetricCollection.
+        Make sure to not compute the metric on targets == -1 (ignore_index=-1) if the validation set has missing labels.
+        Defaults to F1+Precision+Recall in macro mode.
+    metric_classwise: Union[Metric, Sequence[Metric], Dict[str, Metric]], optional
+        Validation metric(s) to compute for each class (binary). Can be anything supported by torchmetrics.MetricCollection.
+        Defaults to F1+Precision+Recall.
     """
 
     def __init__(
@@ -358,11 +362,10 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
             y_pred_labelled, y_true_labelled.type(torch.float)
         )
 
-        # log global metric
-        # TODO: allow using real multilabel metrics (when mask.all() ?)
+        # log global metric (multilabel)
         self.model.validation_metric(
-            y_pred_labelled,
-            y_true_labelled,
+            y_pred.reshape((-1, y_pred.shape[-1])),
+            y_true.reshape((-1, y_true.shape[-1])),
         )
         self.model.log_dict(
             self.model.validation_metric,
@@ -407,6 +410,7 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
                 logger=True,
             )
 
+        # log losses
         self.model.log(
             f"{self.logging_prefix}ValLoss",
             loss,
@@ -429,16 +433,28 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
     ) -> Union[Metric, Sequence[Metric], Dict[str, Metric]]:
         class_count = len(self.classes)
         if class_count > 1:  # multilabel
-            # task is binary because in case some targets are missing, we
-            # can't compute multilabel metrics anymore (torchmetrics doesn't allow
-            # us to ignore specific classes for specific data points)
             return [
-                F1Score(task="binary"),
-                Precision(task="binary"),
-                Recall(task="binary"),
+                F1Score(
+                    task="multilabel",
+                    num_labels=class_count,
+                    ignore_index=-1,
+                    average="macro",
+                ),
+                Precision(
+                    task="multilabel",
+                    num_labels=class_count,
+                    ignore_index=-1,
+                    average="macro",
+                ),
+                Recall(
+                    task="multilabel",
+                    num_labels=class_count,
+                    ignore_index=-1,
+                    average="macro",
+                ),
             ]
         else:
-            # This case is handled by the per-class metric, see 'default_metric_classwise'
+            # Binary classification, this case is handled by the per-class metric, see 'default_metric_per_class'/'metric_classwise'
             return []
 
     def default_metric_classwise(
@@ -459,10 +475,10 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
         return MetricCollection(self._metric_classwise, prefix=self.logging_prefix)
 
     def setup_validation_metric(self):
-        # setup validation metric
+        # setup global/multilabel validation metric
         super().setup_validation_metric()
 
-        # and then setup validation metric per class
+        # and then setup validation metric per class / classwise metrics
         metric = self.metric_classwise
         if metric is None:
             return
@@ -472,7 +488,7 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
         )
         for class_name in self.classes:
             self.model.validation_metric_classwise[class_name] = metric.clone(
-                prefix=self.logging_prefix, postfix=f"-{class_name}"
+                prefix=f"{self.logging_prefix}{class_name}-"
             )
 
     @property
