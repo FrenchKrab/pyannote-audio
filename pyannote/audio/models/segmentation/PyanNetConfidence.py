@@ -70,12 +70,15 @@ class PyanNetConfidence(PyanNet):
     def build(self):
         super().build()
 
+        confidence_classes_count = self.hparams.confidence["class_count"]
+
         # let the super().build() compute the number of in/out features
         in_features = self.classifier.in_features
         out_features = self.classifier.out_features
+
         self.classifier = torch.nn.Linear(
-            in_features, out_features + self.confidence_classes
+            in_features, out_features + confidence_classes_count
         )
         self.activation = ConfidenceSpecificActivation(
-            self.default_activation(), self.confidence_classes
+            self.default_activation(), confidence_classes_count
         )
