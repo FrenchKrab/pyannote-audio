@@ -141,6 +141,7 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         # TODO: add support for class weights
 
         # mask (frame, class) index for which label is missing
+        # TODO : handle masking
         mask: torch.Tensor = y_true != -1
         y_pred = y_pred[mask].reshape(y_pred.shape)
         y_true = y_true[mask].reshape(y_true.shape)
@@ -204,7 +205,6 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         y_pred = model_output[:,:,:-1]
         y_true = batch["y"]
         y_confidence = model_output[:,:,-1:]
-        print(f"{y_pred.shape=}{y_true.shape=}")
         assert y_pred.shape == y_true.shape
 
         # TODO: add support for frame weights
@@ -216,12 +216,13 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         mask: torch.Tensor = y_true != -1
         y_pred_labelled = y_pred[mask]
         y_true_labelled = y_true[mask]
+        y_confidence_labelled = y_confidence[mask]
         
-        y_pred_cheated = y_confidence * y_pred + (1-y_confidence) * y_true 
+        y_pred_cheated = y_confidence_labelled * y_pred_labelled + (1-y_confidence_labelled) * y_true_labelled 
 
-        loss_real_bce = F.binary_cross_entropy(y_pred, y_true.type(torch.float))
-        loss_l = F.binary_cross_entropy(y_pred_cheated, y_true.type(torch.float))
-        loss_c = -torch.log(y_confidence).mean()
+        loss_real_bce = F.binary_cross_entropy(y_pred_labelled, y_true_labelled.type(torch.float))
+        loss_l = F.binary_cross_entropy(y_pred_cheated, y_true_labelled.type(torch.float))
+        loss_c = -torch.log(y_confidence_labelled).mean()
         loss = loss_l + loss_c
 
         # log loggables

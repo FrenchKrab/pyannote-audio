@@ -23,15 +23,13 @@
 from functools import cached_property
 import math
 from typing import Dict, List, Literal, Optional, Sequence, Text, Tuple, Union
-from einops import rearrange
-
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.tensorboard import SummaryWriter
 from pyannote.core import Segment, SlidingWindow, SlidingWindowFeature
 from pyannote.database import Protocol
 from pyannote.database.protocol import SegmentationProtocol
+from torch.utils.tensorboard.writer import SummaryWriter
 from torch_audiomentations.core.transforms_interface import BaseWaveformTransform
 from torchmetrics import (
     CalibrationError,
@@ -41,7 +39,6 @@ from torchmetrics import (
     Recall,
     MetricCollection,
 )
-from torchmetrics import F1Score, Metric, MetricCollection, Precision, Recall
 from pytorch_lightning.loggers import TensorBoardLogger
 
 from pyannote.audio.core.task import Problem, Resolution, Specifications, Task
@@ -94,6 +91,7 @@ class LoggableHistogram(Loggable):
     def _get_values(self, data) -> torch.Tensor:
         return data[self.values_field]
 
+    @torch.inference_mode()
     def update(self, data):
         values = self._get_values(data).flatten()
         hist, _ = torch.histogram(values.float().cpu(), bins=self.bins, density=False)
