@@ -349,4 +349,4 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         pytorch_lightning.callbacks.EarlyStopping
         """
 
-        return f"{self.logging_prefix}ValLossBCE", "min"
+        return f"{self.logging_prefix}BinaryCalibrationErrorPrediction", "min"
