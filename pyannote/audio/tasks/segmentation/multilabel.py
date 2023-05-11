@@ -508,4 +508,4 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
         pytorch_lightning.callbacks.EarlyStopping
         """
 
-        return f"{self.logging_prefix}BinaryCalibrationError-sp", "min"
+        return f"{self.logging_prefix}sp-BinaryCalibrationError", "min"
