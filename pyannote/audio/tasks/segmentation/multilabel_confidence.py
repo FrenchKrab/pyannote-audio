@@ -86,6 +86,7 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         protocol: Protocol,
         budget: float,
         forced_exploration_ratio: float = 0.5,  # ratio of the batch that wont be affected by the confidence "cheating"
+        lambda_multiplier: float = 0.99,    # how fast should we adjust lambda
         # normal args
         classes: Optional[List[str]] = None,
         duration: float = 2.0,
@@ -123,6 +124,7 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         )
 
         self.budget = budget
+        self.lambda_multiplier = lambda_multiplier
         self.lmbda = 0.1
         self.forced_exploration_ratio = forced_exploration_ratio
 
@@ -191,9 +193,9 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         )
 
         if self.budget > loss_c:
-            self.lmbda /= 1.01
+            self.lmbda *= self.lambda_multiplier
         else:
-            self.lmbda /= 0.99
+            self.lmbda *= 1/self.lambda_multiplier
 
         return {"loss": loss}
 
