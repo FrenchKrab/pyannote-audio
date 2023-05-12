@@ -143,17 +143,17 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         # TODO: add support for class weights
 
         # mask (frame, class) index for which label is missing
-        # TODO : handle masking
         mask: torch.Tensor = y_true != -1
-        y_pred = y_pred[mask].reshape(y_pred.shape)
-        y_true = y_true[mask].reshape(y_true.shape)
-
-        y_pred_cheated = y_confidence * y_pred + (1-y_confidence) * y_true
+        y_pred_labelled = y_pred[mask]
+        y_true_labelled = y_true[mask]
+        y_confidence_labelled = y_confidence[mask]
+        
+        y_pred_cheated = y_confidence_labelled * y_pred_labelled + (1-y_confidence_labelled) * y_true_labelled 
         forced_exploration_count = int(self.forced_exploration_ratio * self.batch_size)
-        y_pred_cheated[:forced_exploration_count] = y_pred[:forced_exploration_count]
+        y_pred_cheated[:forced_exploration_count] = y_pred_labelled[:forced_exploration_count]
 
-        loss_l = F.binary_cross_entropy(y_pred_cheated, y_true.type(torch.float))
-        loss_c = -torch.log(y_confidence).mean()
+        loss_l = F.binary_cross_entropy(y_pred_cheated, y_true_labelled.type(torch.float))
+        loss_c = -torch.log(y_confidence_labelled).mean()
         loss = loss_l + self.lmbda * loss_c
 
         self.model.log(
@@ -176,7 +176,7 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
 
         self.model.log(
             f"{self.logging_prefix}TrainLossConfidence",
-            loss_l,
+            loss_c,
             on_step=False,
             on_epoch=True,
             prog_bar=True,
