@@ -94,6 +94,9 @@ class LoggableHistogram(Loggable):
     @torch.inference_mode()
     def update(self, data):
         values = self._get_values(data).flatten()
+        if values.shape[0] == 0:
+            return
+
         hist, _ = torch.histogram(values.float().cpu(), bins=self.bins, density=False)
         self.num += len(values)
         self.totals += hist
