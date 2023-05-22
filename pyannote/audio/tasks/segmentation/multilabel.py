@@ -102,7 +102,6 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
         metric: Union[Metric, Sequence[Metric], Dict[str, Metric]] = None,
         metric_classwise: Union[Metric, Sequence[Metric], Dict[str, Metric]] = None,
     ):
-
         if not isinstance(protocol, SegmentationProtocol):
             raise ValueError(
                 f"MultiLabelSegmentation task expects a SegmentationProtocol but you gave {type(protocol)}. "
@@ -129,7 +128,6 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
         # specifications to setup()
 
     def setup(self, stage: Optional[str] = None):
-
         super().setup(stage=stage)
 
         self.specifications = Specifications(
@@ -216,7 +214,6 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
         return sample
 
     def training_step(self, batch, batch_idx: int):
-
         X = batch["X"]
         y_pred = self.model(X)
         y_true = batch["y"]
@@ -246,7 +243,6 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
         return {"loss": loss}
 
     def validation_step(self, batch, batch_idx: int):
-
         X = batch["X"]
         y_pred = self.model(X)
         y_true = batch["y"]
@@ -314,25 +310,25 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
         self,
     ) -> Union[Metric, Sequence[Metric], Dict[str, Metric]]:
         class_count = len(self.classes)
-        if class_count > 1:  # multilabel
+        if class_count >= 1:  # multilabel
             return [
                 F1Score(
                     task="multilabel",
                     num_labels=class_count,
                     ignore_index=-1,
-                    average="macro",
+                    average="none",
                 ),
                 Precision(
                     task="multilabel",
                     num_labels=class_count,
                     ignore_index=-1,
-                    average="macro",
+                    average="none",
                 ),
                 Recall(
                     task="multilabel",
                     num_labels=class_count,
                     ignore_index=-1,
-                    average="macro",
+                    average="none",
                 ),
             ]
         else:

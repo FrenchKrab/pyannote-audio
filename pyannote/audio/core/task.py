@@ -30,7 +30,18 @@ from dataclasses import dataclass
 from enum import Enum
 from functools import cached_property, partial
 from numbers import Number
-from typing import Dict, List, Literal, Optional, Sequence, Text, Tuple, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    Sequence,
+    Text,
+    Tuple,
+    Union,
+)
 
 import pytorch_lightning as pl
 import scipy.special
@@ -43,6 +54,56 @@ from torchmetrics import Metric, MetricCollection
 
 from pyannote.audio.utils.loss import binary_cross_entropy, nll_loss
 from pyannote.audio.utils.protocol import check_protocol
+
+
+class UnreducedToBinaryMetric(Metric):
+    def __init__(
+        self,
+        metric: Metric,
+        class_index: int,
+        do_update: bool,
+    ) -> None:
+        super().__init__()
+
+        self.metric = metric
+        self.class_index = class_index
+        self.do_update = do_update
+
+    def update(self, *args: Any, **kwargs: Any) -> None:
+        if self.do_update:
+            self.metric.update(*args, **self.metric._filter_kwargs(**kwargs))
+
+    def compute(self) -> Any:
+        val = self.metric.compute()
+        # return only desired class index
+        return val[..., self.class_index]
+
+    @torch.jit.unused
+    def forward(self, *args: Any, **kwargs: Any) -> Any:
+        return self.metric(*args, **self.metric._filter_kwargs(**kwargs))
+
+    def reset(self) -> None:
+        self.metric.reset()
+
+    def persistent(self, mode: bool = False) -> None:
+        self.metric.persistent(mode=mode)
+
+    def __repr__(self) -> str:
+        return repr(self.metric)
+
+    def _wrap_compute(self, compute: Callable) -> Callable:
+        return compute
+
+
+class UnreducedToBinaryMetricCollection(MetricCollection):
+    def __init__(self, metric: Metric, classes: List[str]) -> None:
+        metrics_dict = {
+            f"{class_name}": UnreducedToBinaryMetric(
+                metric, i, True if i == 0 else False
+            )
+            for i, class_name in enumerate(classes)
+        }
+        super().__init__(metrics_dict)
 
 
 # Type of machine learning problem
@@ -92,7 +153,6 @@ class Specifications:
 
     @cached_property
     def powerset(self):
-
         if self.powerset_max_classes is None:
             return False
 
@@ -298,7 +358,6 @@ class Task(pl.LightningDataModule):
 
     @cached_property
     def logging_prefix(self):
-
         prefix = f"{self.__class__.__name__}-"
         if hasattr(self.protocol, "name"):
             # "." has a special meaning for pytorch-lightning checkpointing
@@ -454,7 +513,28 @@ class Task(pl.LightningDataModule):
         if self._metric is None:
             self._metric = self.default_metric()
 
-        return MetricCollection(self._metric, prefix=self.logging_prefix)
+        if isinstance(self._metric, Metric):
+            self._metrics = [self._metric]
+
+        if isinstance(self._metric, dict):
+            metrics = self._metrics
+        elif isinstance(self._metric, Sequence):
+            metrics = {m.__class__.__name__: m for m in self._metric}
+
+        to_add = {}
+        for metric_name, metric in metrics.items():
+            if metric.average == "none":
+                to_add[metric_name] = UnreducedToBinaryMetricCollection(
+                    metric, self.classes
+                )
+                print(f"replaced {metric_name}")
+            else:
+                to_add[metric_name] = metric
+                print(f"readded {metric_name}")
+        current_collection = MetricCollection(to_add, prefix=self.logging_prefix)
+        print(f"{list(current_collection.keys())}")
+
+        return current_collection
 
     def setup_validation_metric(self):
         metric = self.metric
