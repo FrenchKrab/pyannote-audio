@@ -27,6 +27,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from pyannote.core import Segment, SlidingWindow, SlidingWindowFeature
+from pyannote.audio.torchmetrics.classification.calibration_error import BinaryCalibrationErrorUniform
 from pyannote.database import Protocol
 from pyannote.database.protocol import SegmentationProtocol
 from torch.utils.tensorboard.writer import SummaryWriter
@@ -466,6 +467,7 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
             Precision(task="binary"),
             Recall(task="binary"),
             CalibrationError(task="binary"),
+            BinaryCalibrationErrorUniform(),
         ]
 
     @cached_property
