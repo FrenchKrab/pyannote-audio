@@ -20,7 +20,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-from typing import Dict, List, Optional, Sequence, Text, Tuple, Union
+from typing import Dict, List, Literal, Optional, Sequence, Text, Tuple, Union
 
 import numpy as np
 import torch
@@ -87,6 +87,7 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         budget: float,
         forced_exploration_ratio: float = 0.5,  # ratio of the batch that wont be affected by the confidence "cheating"
         lambda_multiplier: float = 0.99,    # how fast should we adjust lambda
+        pred_to_conf: Literal["rescale","offset"] = "rescale",  # how to convert prediction to confidence
         # normal args
         classes: Optional[List[str]] = None,
         duration: float = 2.0,
@@ -127,16 +128,26 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         self.lambda_multiplier = lambda_multiplier
         self.lmbda = 0.1
         self.forced_exploration_ratio = forced_exploration_ratio
+        self.pred_to_conf = pred_to_conf
 
 
     def training_step(self, batch, batch_idx: int):
 
         X = batch["X"]
         model_output = self.model(X)
-
-        y_pred = model_output[:,:,:-1]
         y_true = batch["y"]
-        y_confidence = model_output[:,:,-1:]
+
+        dedicated_conf_outputs = model_output.shape[2] - len(self.classes)
+        if dedicated_conf_outputs > 0:
+            y_pred = model_output[:,:,:-dedicated_conf_outputs]
+            y_confidence = model_output[:,:,-dedicated_conf_outputs:]
+        else:
+            y_pred = model_output
+            y_confidence = torch.abs(model_output - 0.5) + 0.5
+            if self.pred_to_conf == "rescale":
+                y_confidence = torch.abs(model_output - 0.5) / 0.5
+            elif self.pred_to_conf == "offset":
+                y_confidence = torch.abs(model_output - 0.5) + 0.5
         assert y_pred.shape == y_true.shape
 
         # TODO: add support for frame weights
@@ -204,9 +215,18 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         X = batch["X"]
         model_output = self.model(X)
 
-        y_pred = model_output[:,:,:-1]
-        y_true = batch["y"]
-        y_confidence = model_output[:,:,-1:]
+        dedicated_conf_outputs = model_output.shape[2] - len(self.classes)
+        if dedicated_conf_outputs > 0:
+            y_pred = model_output[:,:,:-dedicated_conf_outputs]
+            y_true = batch["y"]
+            y_confidence = model_output[:,:,-dedicated_conf_outputs:]
+        else:
+            y_pred = model_output
+            y_true = batch["y"]
+            if self.pred_to_conf == "rescale":
+                y_confidence = torch.abs(model_output - 0.5) / 0.5
+            elif self.pred_to_conf == "offset":
+                y_confidence = torch.abs(model_output - 0.5) + 0.5
         assert y_pred.shape == y_true.shape
 
         # TODO: add support for frame weights
