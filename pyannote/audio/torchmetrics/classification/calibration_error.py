@@ -90,7 +90,7 @@ class BinaryCalibrationErrorV2(BinaryCalibrationError):
     def compute(self) -> Tensor:
         confidences = dim_zero_cat(self.confidences)
         accuracies = dim_zero_cat(self.accuracies)
-        return _ce_compute(confidences, accuracies, self.n_bins, norm=self.norm)
+        return _ce_compute(confidences, accuracies, self.n_bins, norm=self.norm, bin_weighting=self.bins_weighting)
 
 class BinaryCalibrationErrorUniform(BinaryCalibrationErrorV2):
     def __init__(
