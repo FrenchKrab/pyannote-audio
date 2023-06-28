@@ -20,6 +20,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+from pyexpat import model
 from typing import Dict, List, Literal, Optional, Sequence, Text, Tuple, Union
 
 import numpy as np
@@ -228,7 +229,7 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
                 self.budget > loss_c,
                 self.lmbda * self.lambda_multiplier,
                 self.lmbda * (1 / self.lambda_multiplier),
-            )
+            ).to(self.model.device)
 
         return {"loss": loss}
 
@@ -392,6 +393,7 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
             self.budget = torch.Tensor(self._budget_og, requires_grad=False)
         elif isinstance(self._budget_og, torch.Tensor):
             self.budget = self._budget_og
+        self.budget = self.budget.to(self.model.device)
 
         self.lmbda = torch.ones(
             num_conf,
