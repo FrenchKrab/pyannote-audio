@@ -25,11 +25,12 @@ from typing import Dict, List, Literal, Optional, Sequence, Text, Tuple, Union
 import numpy as np
 import torch
 import torch.nn.functional as F
+from einops import rearrange
 from pyannote.core import Segment, SlidingWindow, SlidingWindowFeature
 from pyannote.database import Protocol
 from pyannote.database.protocol import SegmentationProtocol
 from torch_audiomentations.core.transforms_interface import BaseWaveformTransform
-from torchmetrics import Metric, CalibrationError
+from torchmetrics import Metric, CalibrationError, MetricCollection
 
 from pyannote.audio.tasks import MultiLabelSegmentation
 from pyannote.audio.core.task import Problem, Resolution, Specifications
@@ -81,13 +82,16 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         Validation metric(s). Can be anything supported by torchmetrics.MetricCollection.
         Defaults to AUROC (area under the ROC curve).
     """
+
     def __init__(
         self,
         protocol: Protocol,
-        budget: float,
+        budget: Union[float, List[float]] = 0.3,
         forced_exploration_ratio: float = 0.5,  # ratio of the batch that wont be affected by the confidence "cheating"
-        lambda_multiplier: float = 0.99,    # how fast should we adjust lambda
-        pred_to_conf: Literal["rescale","offset"] = "rescale",  # how to convert prediction to confidence
+        lambda_multiplier: float = 0.99,  # how fast should we adjust lambda
+        pred_to_conf: Literal[
+            "rescale", "offset"
+        ] = "rescale",  # how to convert prediction to confidence
         # normal args
         classes: Optional[List[str]] = None,
         duration: float = 2.0,
@@ -102,7 +106,6 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         metric_classwise: Union[Metric, Sequence[Metric], Dict[str, Metric]] = None,
         loggables: List[Loggable] = None,
     ):
-
         if not isinstance(protocol, SegmentationProtocol):
             raise ValueError(
                 f"MultiLabelSegmentation task expects a SegmentationProtocol but you gave {type(protocol)}. "
@@ -124,30 +127,32 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
             loggables=loggables,
         )
 
-        self.budget = budget
+        self._budget_og = budget
         self.lambda_multiplier = lambda_multiplier
-        self.lmbda = 0.1
         self.forced_exploration_ratio = forced_exploration_ratio
         self.pred_to_conf = pred_to_conf
 
-
     def training_step(self, batch, batch_idx: int):
-
         X = batch["X"]
         model_output = self.model(X)
         y_true = batch["y"]
 
         dedicated_conf_outputs = model_output.shape[2] - len(self.classes)
         if dedicated_conf_outputs > 0:
-            y_pred = model_output[:,:,:-dedicated_conf_outputs]
-            y_confidence = model_output[:,:,-dedicated_conf_outputs:]
+            y_pred = model_output[:, :, :-dedicated_conf_outputs]
+            y_confidence = model_output[:, :, -dedicated_conf_outputs:]
         else:
             y_pred = model_output
-            y_confidence = torch.abs(model_output - 0.5) + 0.5
             if self.pred_to_conf == "rescale":
                 y_confidence = torch.abs(model_output - 0.5) / 0.5
             elif self.pred_to_conf == "offset":
                 y_confidence = torch.abs(model_output - 0.5) + 0.5
+            elif self.pred_to_conf == "prediction":
+                # same as offset ?
+                y_confidence = torch.where(
+                    model_output <= 0.5, 1 - model_output, model_output
+                )
+
         assert y_pred.shape == y_true.shape
 
         # TODO: add support for frame weights
@@ -158,14 +163,28 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         y_pred_labelled = y_pred[mask]
         y_true_labelled = y_true[mask]
         y_confidence_labelled = y_confidence[mask]
-        
-        y_pred_cheated = y_confidence_labelled * y_pred_labelled + (1-y_confidence_labelled) * y_true_labelled 
-        forced_exploration_count = int(self.forced_exploration_ratio * self.batch_size)
-        y_pred_cheated[:forced_exploration_count] = y_pred_labelled[:forced_exploration_count]
 
-        loss_l = F.binary_cross_entropy(y_pred_cheated, y_true_labelled.type(torch.float))
-        loss_c = -torch.log(y_confidence_labelled).mean()
-        loss = loss_l + self.lmbda * loss_c
+        y_pred_cheated = (
+            y_confidence_labelled * y_pred_labelled
+            + (1 - y_confidence_labelled) * y_true_labelled
+        )
+        forced_exploration_count = int(self.forced_exploration_ratio * self.batch_size)
+        y_pred_cheated[:forced_exploration_count] = y_pred_labelled[
+            :forced_exploration_count
+        ]
+
+        loss_l = F.binary_cross_entropy(
+            y_pred_cheated, y_true_labelled.type(torch.float)
+        )
+        # for each confidence output, mean all logs of confidences where label is present
+        # (= mean of logs of all confidence weighted by presence of label)
+
+        loss_c = (
+            rearrange(-torch.log(y_confidence), "b f c -> c (f b)")
+            * rearrange(mask, "b f c -> c (f b)")
+        ).sum(dim=1) / mask.sum()
+
+        loss = loss_l + (self.lmbda * loss_c).sum()
 
         self.model.log(
             f"train/loss",
@@ -185,14 +204,15 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
             logger=True,
         )
 
-        self.model.log(
-            f"train/loss_confidence",
-            loss_c,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            logger=True,
-        )
+        for loss_c_individual, name in zip(loss_c, self.classes):
+            self.model.log(
+                f"train/loss_confidence_{name}",
+                loss_c_individual,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+            )
 
         self.model.log(
             f"train/lambda",
@@ -203,23 +223,24 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
             logger=True,
         )
 
-        if self.budget > loss_c:
-            self.lmbda *= self.lambda_multiplier
-        else:
-            self.lmbda *= 1/self.lambda_multiplier
+        with torch.no_grad():
+            self.lmbda = torch.where(
+                self.budget > loss_c,
+                self.lmbda * self.lambda_multiplier,
+                self.lmbda * (1 / self.lambda_multiplier),
+            )
 
         return {"loss": loss}
 
     def validation_step(self, batch, batch_idx: int):
-
         X = batch["X"]
         model_output = self.model(X)
 
         dedicated_conf_outputs = model_output.shape[2] - len(self.classes)
         if dedicated_conf_outputs > 0:
-            y_pred = model_output[:,:,:-dedicated_conf_outputs]
+            y_pred = model_output[:, :, :-dedicated_conf_outputs]
             y_true = batch["y"]
-            y_confidence = model_output[:,:,-dedicated_conf_outputs:]
+            y_confidence = model_output[:, :, -dedicated_conf_outputs:]
         else:
             y_pred = model_output
             y_true = batch["y"]
@@ -239,13 +260,22 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         y_pred_labelled = y_pred[mask]
         y_true_labelled = y_true[mask]
         y_confidence_labelled = y_confidence[mask]
-        
-        y_pred_cheated = y_confidence_labelled * y_pred_labelled + (1-y_confidence_labelled) * y_true_labelled 
 
-        loss_real_bce = F.binary_cross_entropy(y_pred_labelled, y_true_labelled.type(torch.float))
-        loss_l = F.binary_cross_entropy(y_pred_cheated, y_true_labelled.type(torch.float))
-        loss_c = -torch.log(y_confidence_labelled).mean()
-        loss = loss_l + loss_c
+        y_pred_cheated = (
+            y_confidence_labelled * y_pred_labelled
+            + (1 - y_confidence_labelled) * y_true_labelled
+        )
+
+        loss_real_bce = F.binary_cross_entropy(
+            y_pred_labelled, y_true_labelled.type(torch.float)
+        )
+        loss_l = F.binary_cross_entropy(
+            y_pred_cheated, y_true_labelled.type(torch.float)
+        )
+        loss_c = (
+            rearrange(-torch.log(y_confidence), "b f c -> c (f b)")
+            * rearrange(mask, "b f c -> c (f b)")
+        ).sum(dim=1) / mask.sum()
 
         # log loggables
         loggable_data = {
@@ -284,15 +314,17 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
                 logger=True,
             )
 
-        # log val confidence
-        if self.model.val_confidence_metric is not None:
-            self.model.val_confidence_metric(
-                y_confidence.reshape((-1,y_pred.shape[-1])).squeeze(),
-                (y_true==y_pred.mul(2).int().float()).reshape((-1,y_pred.shape[-1])).squeeze()
+            # log val confidence metric
+            y_conf_labelled = y_confidence[..., class_id][mask]
+
+            classwise_conf_metric = self.model.val_confidence_metric[class_name]
+            classwise_conf_metric(
+                y_conf_labelled,
+                (y_true_labelled == (y_pred_labelled > 0.5).int()),
             )
             self.model.log(
-                f"val/confidence_ece",
-                self.model.val_confidence_metric,
+                f"val/confidence_metric_{class_name}",
+                classwise_conf_metric,
                 on_step=False,
                 on_epoch=True,
                 prog_bar=True,
@@ -300,8 +332,8 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
             )
 
         self.model.validation_metric(
-            y_pred.reshape((-1,y_pred.shape[-1])).squeeze(),
-            y_true.reshape((-1,y_pred.shape[-1])).squeeze()
+            y_pred.reshape((-1, y_pred.shape[-1])).squeeze(),
+            y_true.reshape((-1, y_pred.shape[-1])).squeeze(),
         )
 
         self.model.log_dict(
@@ -312,14 +344,6 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
             logger=True,
         )
 
-        self.model.log(
-            f"val/loss",
-            loss,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            logger=True,
-        )
         self.model.log(
             f"val/loss_cheated_bce",
             loss_l,
@@ -336,21 +360,44 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
             prog_bar=True,
             logger=True,
         )
-        self.model.log(
-            f"val/loss_confidence",
-            loss_c,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            logger=True,
-        )
-        return {"loss": loss_real_bce}
 
+        for loss_c_individual, name in zip(loss_c, self.classes):
+            self.model.log(
+                f"val/loss_confidence_{name}",
+                loss_c_individual,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+            )
+        return {"loss": loss_real_bce}
 
     def setup_validation_metric(self):
         super().setup_validation_metric()
 
-        self.model.val_confidence_metric = CalibrationError("binary", norm="l1")
+        num_conf = self.model.hparams.confidence["num_classes"]
+        if num_conf != len(self.classes):
+            raise ValueError(
+                f"Unsupported number of confidence outputs, # of confidences ({num_conf}) should be == # of classes ({len(self.classes)})"
+            )
+
+        self.model.val_confidence_metric = torch.nn.ModuleDict({
+            cname: CalibrationError("binary", norm="l1") for cname in self.classes
+        })
+
+        # TODO: move this somewhere more appropriate
+        if isinstance(self._budget_og, float):
+            self.budget = torch.ones(num_conf, requires_grad=False) * self._budget_og
+        elif isinstance(self._budget_og, list):
+            self.budget = torch.Tensor(self._budget_og, requires_grad=False)
+        elif isinstance(self._budget_og, torch.Tensor):
+            self.budget = self._budget_og
+
+        self.lmbda = torch.ones(
+            num_conf,
+            requires_grad=False,
+            device=self.model.device,
+        )
 
     @property
     def val_monitor(self):
