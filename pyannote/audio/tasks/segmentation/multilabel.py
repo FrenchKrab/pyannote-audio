@@ -460,7 +460,7 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
             Precision(task="binary"),
             Recall(task="binary"),
             CalibrationError(task="binary"),
-            BinaryCalibrationErrorUniform(),
+            # BinaryCalibrationErrorUniform(),
         ]
 
     @cached_property
@@ -468,7 +468,7 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
         if self._metric_classwise is None:
             self._metric_classwise = self.default_metric_classwise()
 
-        return MetricCollection(self._metric_classwise, prefix=self.logging_prefix)
+        return MetricCollection(self._metric_classwise)
 
     def setup_validation_metric(self):
         # setup global/multilabel validation metric
@@ -484,7 +484,7 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
         )
         for class_name in self.classes:
             self.model.validation_metric_classwise[class_name] = metric.clone(
-                prefix=f"{self.logging_prefix}{class_name}-"
+                prefix=f"{class_name}-"
             )
 
     @property

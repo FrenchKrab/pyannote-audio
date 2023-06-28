@@ -168,7 +168,7 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         loss = loss_l + self.lmbda * loss_c
 
         self.model.log(
-            f"{self.logging_prefix}TrainLoss",
+            f"train/loss",
             loss,
             on_step=False,
             on_epoch=True,
@@ -177,7 +177,7 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         )
 
         self.model.log(
-            f"{self.logging_prefix}TrainLossCheatedBCE",
+            f"train/loss_cheated_bce",
             loss_l,
             on_step=False,
             on_epoch=True,
@@ -186,7 +186,7 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         )
 
         self.model.log(
-            f"{self.logging_prefix}TrainLossConfidence",
+            f"train/loss_confidence",
             loss_c,
             on_step=False,
             on_epoch=True,
@@ -195,8 +195,8 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         )
 
         self.model.log(
-            f"{self.logging_prefix}TrainLambda",
-            loss,
+            f"train/lambda",
+            self.lmbda,
             on_step=True,
             on_epoch=False,
             prog_bar=True,
@@ -291,7 +291,7 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
                 (y_true==y_pred.mul(2).int().float()).reshape((-1,y_pred.shape[-1])).squeeze()
             )
             self.model.log(
-                f"{self.logging_prefix}BinaryCalibrationErrorPrediction",
+                f"val/confidence_ece",
                 self.model.val_confidence_metric,
                 on_step=False,
                 on_epoch=True,
@@ -313,7 +313,7 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         )
 
         self.model.log(
-            f"{self.logging_prefix}ValLoss",
+            f"val/loss",
             loss,
             on_step=False,
             on_epoch=True,
@@ -321,7 +321,7 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
             logger=True,
         )
         self.model.log(
-            f"{self.logging_prefix}ValLossCheatedBCE",
+            f"val/loss_cheated_bce",
             loss_l,
             on_step=False,
             on_epoch=True,
@@ -329,7 +329,7 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
             logger=True,
         )
         self.model.log(
-            f"{self.logging_prefix}ValLossBCE",
+            f"val/loss_bce",
             loss_real_bce,
             on_step=False,
             on_epoch=True,
@@ -337,7 +337,7 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
             logger=True,
         )
         self.model.log(
-            f"{self.logging_prefix}ValLossConfidence",
+            f"val/loss_confidence",
             loss_c,
             on_step=False,
             on_epoch=True,
@@ -371,4 +371,4 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         pytorch_lightning.callbacks.EarlyStopping
         """
 
-        return f"{self.logging_prefix}ValLossBCE", "min"
+        return f"val/loss_bce", "min"
