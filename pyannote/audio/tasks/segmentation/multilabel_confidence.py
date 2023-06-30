@@ -128,6 +128,11 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
             loggables=loggables,
         )
 
+        if not isinstance(budget, list) and not isinstance(budget, float):
+            raise ValueError(
+                f"budget should be a float or a list of floats, but you gave {type(budget)}."
+            )
+
         self._budget_og = budget
         self.lambda_multiplier = lambda_multiplier
         self.forced_exploration_ratio = forced_exploration_ratio
@@ -185,7 +190,8 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
             * rearrange(mask, "b f c -> c (f b)")
         ).sum(dim=1) / mask.sum()
 
-        loss = loss_l + (self.lmbda * loss_c).sum()
+        loss_c_final = (self.lmbda.to(loss_c.device) * loss_c).sum()
+        loss = loss_l + loss_c_final
 
         self.model.log(
             f"train/loss",
@@ -205,9 +211,9 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
             logger=True,
         )
 
-        for loss_c_individual, name in zip(loss_c, self.classes):
+        for loss_c_individual, lmbda_individual, name in zip(loss_c, self.lmbda, self.classes):
             self.model.log(
-                f"train/loss_confidence_{name}",
+                f"train/loss_confidence-{name}",
                 loss_c_individual,
                 on_step=False,
                 on_epoch=True,
@@ -215,21 +221,21 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
                 logger=True,
             )
 
-        self.model.log(
-            f"train/lambda",
-            self.lmbda,
-            on_step=True,
-            on_epoch=False,
-            prog_bar=True,
-            logger=True,
-        )
+            self.model.log(
+                f"train/lambda-{name}",
+                lmbda_individual,
+                on_step=True,
+                on_epoch=False,
+                prog_bar=True,
+                logger=True,
+            )
 
         with torch.no_grad():
             self.lmbda = torch.where(
-                self.budget > loss_c,
+                self.budget > loss_c.to(self.budget.device),
                 self.lmbda * self.lambda_multiplier,
                 self.lmbda * (1 / self.lambda_multiplier),
-            ).to(self.model.device)
+            )
 
         return {"loss": loss}
 
@@ -354,7 +360,7 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
             logger=True,
         )
         self.model.log(
-            f"val/loss_bce",
+            f"loss/val",
             loss_real_bce,
             on_step=False,
             on_epoch=True,
