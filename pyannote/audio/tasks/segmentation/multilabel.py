@@ -20,17 +20,28 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+import math
+from functools import cached_property
 from typing import Callable, Dict, List, Literal, Optional, Sequence, Text, Tuple, Union
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from pyannote.core import Segment, SlidingWindowFeature
+from einops import rearrange
+from pyannote.core import Segment, SlidingWindow, SlidingWindowFeature
 from pyannote.database import Protocol
 from pyannote.database.protocol import SegmentationProtocol
+from pytorch_lightning.loggers import TensorBoardLogger
+from torch.utils.tensorboard.writer import SummaryWriter
 from torch_audiomentations.core.transforms_interface import BaseWaveformTransform
-from torchmetrics import Metric
-from einops import rearrange
+from torchmetrics import (
+    CalibrationError,
+    F1Score,
+    Metric,
+    MetricCollection,
+    Precision,
+    Recall,
+)
 
 from pyannote.audio.core.task import (
     Postcalls,
@@ -40,6 +51,9 @@ from pyannote.audio.core.task import (
     Task,
 )
 from pyannote.audio.tasks.segmentation.mixins import SegmentationTaskMixin
+from pyannote.audio.torchmetrics.classification.calibration_error import (
+    BinaryCalibrationErrorUniform,
+)
 
 
 class PseudoLabelTeacher(Postcalls):
@@ -112,6 +126,91 @@ class PseudoLabelTeacher(Postcalls):
         return result
 
 
+class Loggable:
+    def __init__(
+        self,
+        name: str = "Histogram",
+        update_in: Literal["train", "val"] = "val",
+        log_on: Literal["step", "epoch"] = "epoch",
+    ):
+        self.name = name
+        self.update_in = update_in
+        self.compute_on = log_on
+
+    # TODO: use kwargs ? also, pass task/model in calls
+    def update(
+        self,
+        data: dict,
+    ):
+        raise NotImplementedError()
+
+    def log(self, loggers: list, current_epoch: int, batch_idx: int):
+        raise NotImplementedError()
+
+    def clear(self):
+        raise NotImplementedError()
+
+
+class LoggableHistogram(Loggable):
+    def __init__(
+        self,
+        bins: torch.Tensor,
+        values_field: str = "y_pred",
+        name: str = "Histogram",
+        update_in: Literal["train", "val"] = "val",
+    ):
+        super().__init__(
+            name=name,
+            update_in=update_in,
+            log_on="epoch",
+        )
+        self.bins = bins
+        self.values_field = values_field
+
+        self.clear()  # initialize all state values
+
+    def _get_values(self, data) -> torch.Tensor:
+        return data[self.values_field]
+
+    @torch.inference_mode()
+    def update(self, data):
+        values = self._get_values(data).flatten()
+        if values.shape[0] == 0:
+            return
+
+        hist, _ = torch.histogram(values.float().cpu(), bins=self.bins, density=False)
+        self.num += len(values)
+        self.totals += hist
+        self.min = min(self.min, values.min().item())
+        self.max = max(self.max, values.max().item())
+        self.sum += values.sum()
+        self.sum_square += values.dot(values)
+
+    def log(self, loggers: list, current_epoch: int, batch_idx: int):
+        for logger in loggers:
+            if isinstance(logger, TensorBoardLogger):
+                experiment: SummaryWriter = logger.experiment
+                experiment.add_histogram_raw(
+                    self.name,
+                    min=self.min,
+                    max=self.max,
+                    num=self.num,
+                    sum=self.sum,
+                    sum_squares=self.sum_square,
+                    bucket_limits=self.bins[1:],
+                    bucket_counts=self.totals,
+                    global_step=current_epoch,
+                )
+
+    def clear(self):
+        self.totals = torch.zeros(len(self.bins) - 1)
+        self.num = 0
+        self.sum = 0
+        self.sum_square = 0
+        self.min = math.inf
+        self.max = -math.inf
+
+
 class MultiLabelSegmentation(SegmentationTaskMixin, Task):
     """Generic multi-label segmentation
 
@@ -154,8 +253,12 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
         torch_audiomentations waveform transform, used by dataloader
         during training.
     metric : optional
-        Validation metric(s). Can be anything supported by torchmetrics.MetricCollection.
-        Defaults to AUROC (area under the ROC curve).
+        Multilabel validation metric(s). Can be anything supported by torchmetrics.MetricCollection.
+        Make sure to not compute the metric on targets == -1 (ignore_index=-1) if the validation set has missing labels.
+        Defaults to F1+Precision+Recall in macro mode.
+    metric_classwise: Union[Metric, Sequence[Metric], Dict[str, Metric]], optional
+        Validation metric(s) to compute for each class (binary). Can be anything supported by torchmetrics.MetricCollection.
+        Defaults to F1+Precision+Recall.
     """
 
     def __init__(
@@ -172,6 +275,8 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
         augmentation: BaseWaveformTransform = None,
         metric: Union[Metric, Sequence[Metric], Dict[str, Metric]] = None,
         postcalls: Postcalls = None,
+        metric_classwise: Union[Metric, Sequence[Metric], Dict[str, Metric]] = None,
+        loggables: List[Loggable] = None,
     ):
         if not isinstance(protocol, SegmentationProtocol):
             raise ValueError(
@@ -193,6 +298,13 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
         self.balance = balance
         self.weight = weight
         self.classes = classes
+        self._metric_classwise = metric_classwise
+
+        if loggables is None:
+            loggables = []
+        elif isinstance(loggables, Loggable):
+            loggables = [loggables]
+        self.loggables = loggables
 
         # task specification depends on the data: we do not know in advance which
         # classes should be detected. therefore, we postpone the definition of
@@ -319,14 +431,63 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
         # TODO: add support for frame weights
         # TODO: add support for class weights
 
-        # TODO: compute metrics for each class separately
-
         # mask (frame, class) index for which label is missing
         mask: torch.Tensor = y_true != -1
-        y_pred = y_pred[mask]
-        y_true = y_true[mask]
-        loss = F.binary_cross_entropy(y_pred, y_true.type(torch.float))
+        y_pred_labelled = y_pred[mask]
+        y_true_labelled = y_true[mask]
+        loss = F.binary_cross_entropy(
+            y_pred_labelled, y_true_labelled.type(torch.float)
+        )
 
+        # log global metric (multilabel)
+        self.model.validation_metric(
+            y_pred.reshape((-1, y_pred.shape[-1])),
+            y_true.reshape((-1, y_true.shape[-1])),
+        )
+        self.model.log_dict(
+            self.model.validation_metric,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+        )
+
+        loggable_data = {
+            "X": X,
+            "y_pred": y_pred_labelled,
+            "y_true": y_true_labelled,
+        }
+        for loggable in self.loggables:
+            if loggable.update_in == "val":
+                loggable.update(loggable_data)
+            if loggable.compute_on == "step":
+                loggable.log(self.model.loggers, self.model.current_epoch, batch_idx)
+                loggable.clear()
+
+        # log metrics per class
+        for class_id, class_name in enumerate(self.classes):
+            mask: torch.Tensor = y_true[..., class_id] != -1
+            if mask.sum() == 0:
+                continue
+
+            y_pred_labelled = y_pred[..., class_id][mask]
+            y_true_labelled = y_true[..., class_id][mask]
+
+            metric = self.model.validation_metric_classwise[class_name]
+            metric(
+                y_pred_labelled,
+                y_true_labelled,
+            )
+
+            self.model.log_dict(
+                metric,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+            )
+
+        # log losses
         self.model.log(
             "loss/val",
             loss,
@@ -336,6 +497,77 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
             logger=True,
         )
         return {"loss": loss}
+
+    def on_validation_end(self):
+        super().on_validation_end()
+        for loggable in self.loggables:
+            if loggable.compute_on == "epoch":
+                loggable.log(self.model.loggers, self.model.current_epoch, -1)
+                loggable.clear()
+
+    def default_metric(
+        self,
+    ) -> Union[Metric, Sequence[Metric], Dict[str, Metric]]:
+        class_count = len(self.classes)
+        if class_count > 1:  # multilabel
+            return [
+                F1Score(
+                    task="multilabel",
+                    num_labels=class_count,
+                    ignore_index=-1,
+                    average="macro",
+                ),
+                Precision(
+                    task="multilabel",
+                    num_labels=class_count,
+                    ignore_index=-1,
+                    average="macro",
+                ),
+                Recall(
+                    task="multilabel",
+                    num_labels=class_count,
+                    ignore_index=-1,
+                    average="macro",
+                ),
+            ]
+        else:
+            # Binary classification, this case is handled by the per-class metric, see 'default_metric_per_class'/'metric_classwise'
+            return []
+
+    def default_metric_classwise(
+        self,
+    ) -> Union[Metric, Sequence[Metric], Dict[str, Metric]]:
+        return [
+            F1Score(task="binary"),
+            Precision(task="binary"),
+            Recall(task="binary"),
+            CalibrationError(task="binary"),
+            # BinaryCalibrationErrorUniform(),
+        ]
+
+    @cached_property
+    def metric_classwise(self) -> MetricCollection:
+        if self._metric_classwise is None:
+            self._metric_classwise = self.default_metric_classwise()
+
+        return MetricCollection(self._metric_classwise)
+
+    def setup_validation_metric(self):
+        # setup global/multilabel validation metric
+        super().setup_validation_metric()
+
+        # and then setup validation metric per class / classwise metrics
+        metric = self.metric_classwise
+        if metric is None:
+            return
+
+        self.model.validation_metric_classwise = torch.nn.ModuleDict().to(
+            self.model.device
+        )
+        for class_name in self.classes:
+            self.model.validation_metric_classwise[class_name] = metric.clone(
+                prefix=f"{class_name}-"
+            )
 
     @property
     def val_monitor(self):
