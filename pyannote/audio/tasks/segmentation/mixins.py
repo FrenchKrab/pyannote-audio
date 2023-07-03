@@ -38,7 +38,7 @@ from torchaudio.backend.common import AudioMetaData
 from torchmetrics import Metric
 from torchmetrics.classification import BinaryAUROC, MulticlassAUROC, MultilabelAUROC
 
-from pyannote.audio.core.task import Problem
+from pyannote.audio.core.task import Postcalls, Problem
 from pyannote.audio.utils.random import create_rng_for_worker
 
 Subsets = list(Subset.__args__)
@@ -537,19 +537,32 @@ class SegmentationTaskMixin:
         # collate metadata
         collated_meta = self.collate_meta(batch)
 
+        result = {
+            "X": collated_X,
+            "y": collated_y,
+            "meta": collated_meta,
+        }
+
+        # apply postcall
+        pc: Postcalls = self.postcalls
+        if pc.collate_fn_pre_augment is not None:
+            result = pc.collate_fn_pre_augment(result, stage)
+
         # apply augmentation (only in "train" stage)
         self.augmentation.train(mode=(stage == "train"))
         augmented = self.augmentation(
-            samples=collated_X,
+            samples=result["X"],
             sample_rate=self.model.hparams.sample_rate,
-            targets=collated_y.unsqueeze(1),
+            targets=result["y"].unsqueeze(1),
         )
+        result["X"] = augmented.samples
+        result["y"] = augmented.targets.squeeze(1)
 
-        return {
-            "X": augmented.samples,
-            "y": augmented.targets.squeeze(1),
-            "meta": collated_meta,
-        }
+        # apply postcall
+        if pc.collate_fn_post_augment is not None:
+            result = pc.collate_fn_post_augment(result, stage)
+
+        return result
 
     def train__len__(self):
         # Number of training samples in one epoch

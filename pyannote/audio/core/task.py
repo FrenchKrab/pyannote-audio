@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from enum import Enum
 from functools import cached_property, partial
 from numbers import Number
-from typing import Dict, List, Literal, Optional, Sequence, Text, Tuple, Union
+from typing import Callable, Dict, List, Literal, Optional, Sequence, Text, Tuple, TypedDict, Union
 
 import pytorch_lightning as pl
 import scipy.special
@@ -150,6 +150,16 @@ class ValDataset(Dataset):
     def __len__(self):
         return self.task.val__len__()
 
+class Postcalls:
+    collate_fn_pre_augment : Callable[[dict, str], dict]
+    collate_fn_post_augment : Callable[[dict, str], dict]
+
+    def __init__(self, **kwargs) -> None:
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+        self.collate_fn_pre_augment = None
+        self.collate_fn_post_augment = None
+
 
 class Task(pl.LightningDataModule):
     """Base task class
@@ -214,6 +224,7 @@ class Task(pl.LightningDataModule):
         pin_memory: bool = False,
         augmentation: BaseWaveformTransform = None,
         metric: Union[Metric, Sequence[Metric], Dict[str, Metric]] = None,
+        postcalls: Postcalls = None,
     ):
         super().__init__()
 
@@ -253,6 +264,7 @@ class Task(pl.LightningDataModule):
         self.pin_memory = pin_memory
         self.augmentation = augmentation or Identity(output_type="dict")
         self._metric = metric
+        self.postcalls = postcalls if postcalls is not None else Postcalls()
 
     def prepare_data(self):
         """Use this to download and prepare data
