@@ -20,7 +20,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-from typing import Dict, List, Optional, Sequence, Text, Tuple, Union
+from typing import Callable, Dict, List, Literal, Optional, Sequence, Text, Tuple, Union
 
 import numpy as np
 import torch
@@ -30,9 +30,86 @@ from pyannote.database import Protocol
 from pyannote.database.protocol import SegmentationProtocol
 from torch_audiomentations.core.transforms_interface import BaseWaveformTransform
 from torchmetrics import Metric
+from einops import rearrange
 
-from pyannote.audio.core.task import Problem, Resolution, Specifications, Task
+from pyannote.audio.core.task import (
+    Postcalls,
+    Problem,
+    Resolution,
+    Specifications,
+    Task,
+)
 from pyannote.audio.tasks.segmentation.mixins import SegmentationTaskMixin
+
+
+class PseudoLabelTeacher(Postcalls):
+    def __init__(
+        self,
+        teacher,
+        selection_per: Literal["frame", "chunk"] = "chunk",
+        per_chunk_reduction=torch.mean,
+        threshold: float = None,
+        quantile: float = None,
+        weighting_function: Callable = None,
+        replace_targets: bool = True,
+    ):
+        super().__init__()
+        self.teacher = teacher
+        if threshold is not None and quantile is not None:
+            return ValueError("Only one of threshold and quantile can be provided.")
+        self.selection_per = selection_per
+        self.threshold = threshold
+        self.quantile = quantile
+        self.weighting_function = weighting_function
+        self.per_chunk_reduction = per_chunk_reduction
+        self.replace_targets = replace_targets
+
+    @torch.no_grad()
+    def _get_teacher_output(self, x: torch.Tensor) -> torch.Tensor:
+        return self.teacher(waveforms=x.to(self.teacher.device)).to(x.device)
+
+    def _inplace_filter_with_threshold(
+        self, t: torch.Tensor, threshold: Union[float, torch.Tensor]
+    ):
+        if isinstance(threshold, float):
+            threshold = torch.ones(t.shape[2], device=t.device) * threshold
+
+        if self.selection_per == "frame":
+            discarded_mask = (t < threshold) & (t > 1 - threshold)
+            t[discarded_mask] = -1
+        elif self.selection_per == "chunk":
+            # average along the time dimension : compute reducted confidence tensor of shape (batch_size, n_classes)
+            # then the corresponding mask (batch_size, n_classes)-shaped, finally apply it to t (batch_size, n_frames, n_classes)
+            reducted = self.per_chunk_reduction(t, dim=1)
+            discarded_mask = (reducted < threshold) & (reducted > 1 - threshold)
+            t.swapaxes(1, 2)[discarded_mask] = -1
+
+    def collate_fn_pre_augment(self, collated: dict, stage: str) -> dict:
+        if stage != "train":
+            return collated
+
+        result = collated.copy()
+
+        y_hat = self._get_teacher_output(collated["X"])
+        result["y_hat"] = y_hat
+
+        # If we threshold, only keep pseudolabel with confidence over the threshold
+        if self.threshold is not None:
+            self._inplace_filter_with_threshold(y_hat, self.threshold)
+
+        # If we compute per quantile
+        if self.quantile is not None:
+            per_label_quantile = rearrange(y_hat, "b f c -> (b f) c").quantile(
+                self.quantile, dim=0
+            )
+            _inplace_filter_with_threshold(y_hat, per_label_quantile)
+
+        # If we have a weighting function
+        if self.weighting_function is not None:
+            weights = self.weighting_function(y_hat)
+            result["weights"] = weights
+
+        return result
 
 
 class MultiLabelSegmentation(SegmentationTaskMixin, Task):
@@ -94,6 +171,7 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
         pin_memory: bool = False,
         augmentation: BaseWaveformTransform = None,
         metric: Union[Metric, Sequence[Metric], Dict[str, Metric]] = None,
+        postcalls: Postcalls = None,
     ):
         if not isinstance(protocol, SegmentationProtocol):
             raise ValueError(
@@ -109,6 +187,7 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
             pin_memory=pin_memory,
             augmentation=augmentation,
             metric=metric,
+            postcalls=postcalls,
         )
 
         self.balance = balance
