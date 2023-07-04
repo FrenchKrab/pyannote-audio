@@ -285,6 +285,7 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
         X = batch["X"]
         y_pred = self.model(X)
         y_true = batch["y"]
+        weights = batch.get("weights", torch.ones_like(y_true))
         assert y_pred.shape == y_true.shape
 
         # TODO: add support for frame weights
@@ -294,7 +295,7 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
         mask: torch.Tensor = y_true != -1
         y_pred = y_pred[mask]
         y_true = y_true[mask]
-        loss = F.binary_cross_entropy(y_pred, y_true.type(torch.float))
+        loss = F.binary_cross_entropy(y_pred, y_true.type(torch.float), weight=weights)
 
         # skip batch if something went wrong for some reason
         if torch.isnan(loss):
