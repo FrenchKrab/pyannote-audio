@@ -33,6 +33,7 @@ from pyannote.database.protocol import SegmentationProtocol
 from torch.utils.tensorboard.writer import SummaryWriter
 from torch_audiomentations.core.transforms_interface import BaseWaveformTransform
 from torchmetrics import (
+    Accuracy,
     CalibrationError,
     F1Score,
     Metric,
@@ -455,13 +456,15 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
     def default_metric_classwise(
         self,
     ) -> Union[Metric, Sequence[Metric], Dict[str, Metric]]:
-        return [
-            F1Score(task="binary"),
-            Precision(task="binary"),
-            Recall(task="binary"),
-            CalibrationError(task="binary"),
-            # BinaryCalibrationErrorUniform(),
-        ]
+        return {
+            "F1": F1Score(task="binary"),
+            "Precision": Precision(task="binary"),
+            "Recall": Recall(task="binary"),
+            "Accuracy": Accuracy(task="binary"),
+            "ECE_L1": CalibrationError("binary", norm="l1"),
+            "ECE_L2": CalibrationError("binary", norm="l2"),
+            "ECE_max": CalibrationError("binary", norm="max"),
+        }
 
     @cached_property
     def metric_classwise(self) -> MetricCollection:
@@ -484,7 +487,7 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
         )
         for class_name in self.classes:
             self.model.validation_metric_classwise[class_name] = metric.clone(
-                prefix=f"{class_name}-"
+                prefix=f"{class_name}/"
             )
 
     @property
@@ -506,4 +509,4 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
         pytorch_lightning.callbacks.EarlyStopping
         """
 
-        return "ValLoss", "min"
+        return "loss/val", "min"

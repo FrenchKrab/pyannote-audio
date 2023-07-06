@@ -93,6 +93,9 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         pred_to_conf: Literal[
             "rescale", "offset"
         ] = "rescale",  # how to convert prediction to confidence
+        metric_confpred: Optional[
+            Union[Metric, Sequence[Metric], Dict[str, Metric]]
+        ] = None,
         # normal args
         classes: Optional[List[str]] = None,
         duration: float = 2.0,
@@ -137,6 +140,12 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         self.lambda_multiplier = lambda_multiplier
         self.forced_exploration_ratio = forced_exploration_ratio
         self.pred_to_conf = pred_to_conf
+
+        self.metric_confpred = (
+            metric_confpred
+            if metric_confpred is not None
+            else self.default_metric_confpred()
+        )
 
     def training_step(self, batch, batch_idx: int):
         X = batch["X"]
@@ -194,7 +203,7 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         loss = loss_l + loss_c_final
 
         self.model.log(
-            f"train/loss",
+            f"loss/train",
             loss,
             on_step=False,
             on_epoch=True,
@@ -203,7 +212,7 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         )
 
         self.model.log(
-            f"train/loss_cheated_bce",
+            f"loss/train_cheated_bce",
             loss_l,
             on_step=False,
             on_epoch=True,
@@ -324,13 +333,12 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
             # log val confidence metric
             y_conf_labelled = y_confidence[..., class_id][mask]
 
-            classwise_conf_metric = self.model.val_confidence_metric[class_name]
+            classwise_conf_metric = self.model.val_confpred_metric[class_name]
             classwise_conf_metric(
                 y_conf_labelled,
                 (y_true_labelled == (y_pred_labelled > 0.5).int()),
             )
-            self.model.log(
-                f"val/confidence_metric_{class_name}",
+            self.model.log_dict(
                 classwise_conf_metric,
                 on_step=False,
                 on_epoch=True,
@@ -352,7 +360,7 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         )
 
         self.model.log(
-            f"val/loss_cheated_bce",
+            f"loss/val_cheated_bce",
             loss_l,
             on_step=False,
             on_epoch=True,
@@ -370,7 +378,7 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
 
         for loss_c_individual, name in zip(loss_c, self.classes):
             self.model.log(
-                f"val/loss_confidence_{name}",
+                f"loss/val_confidence_{name}",
                 loss_c_individual,
                 on_step=False,
                 on_epoch=True,
@@ -378,6 +386,13 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
                 logger=True,
             )
         return {"loss": loss_real_bce}
+
+    def default_metric_confpred(self):
+        return {
+            "ECE_L1": CalibrationError("binary", norm="l1"),
+            "ECE_L2": CalibrationError("binary", norm="l2"),
+            "ECE_max": CalibrationError("binary", norm="max"),
+        }
 
     def setup_validation_metric(self):
         super().setup_validation_metric()
@@ -388,9 +403,19 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
                 f"Unsupported number of confidence outputs, # of confidences ({num_conf}) should be == # of classes ({len(self.classes)})"
             )
 
-        self.model.val_confidence_metric = torch.nn.ModuleDict({
-            cname: CalibrationError("binary", norm="l1") for cname in self.classes
-        })
+        # add support for more metrics
+        self.model.val_confpred_metric = torch.nn.ModuleDict(
+            {
+                cname: MetricCollection(
+                    {
+                        mname: metric.clone()
+                        for mname, metric in self.metric_confpred.items()
+                    },
+                    prefix=f"{cname}/CONFPRED/",
+                )
+                for cname in self.classes
+            }
+        )
 
         # TODO: move this somewhere more appropriate
         if isinstance(self._budget_og, float):
@@ -426,4 +451,4 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
         pytorch_lightning.callbacks.EarlyStopping
         """
 
-        return f"val/loss_bce", "min"
+        return f"loss/val", "min"
