@@ -411,7 +411,8 @@ class MultiLabelSegmentationConfidence(MultiLabelSegmentation):
                         mname: metric.clone()
                         for mname, metric in self.metric_confpred.items()
                     },
-                    prefix=f"{cname}/CONFPRED/",
+                    prefix=f"{cname}/",
+                    postfix="_CONFPRED",
                 )
                 for cname in self.classes
             }
