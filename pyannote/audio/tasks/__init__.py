@@ -26,6 +26,7 @@ from .segmentation.voice_activity_detection import VoiceActivityDetection  # iso
 from .segmentation.overlapped_speech_detection import (  # isort:skip
     OverlappedSpeechDetection,
 )
+from .segmentation.multiclass import Multiclass  # isort:skip
 from .embedding.arcface import SupervisedRepresentationLearningWithArcFace  # isort:skip
 
 # Segmentation has been renamed to SpeakerDiarization but we keep Segmentation here for backward compatibility
@@ -41,4 +42,5 @@ __all__ = [
     "MultiLabelSegmentation",
     "SpeakerEmbedding",
     "Segmentation",
+    "Multiclass",
 ]
