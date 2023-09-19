@@ -22,7 +22,7 @@
 
 
 import itertools
-from typing import Dict, List, Optional, Sequence, Text, Tuple, Union
+from typing import Dict, List, Literal, Optional, Sequence, Text, Tuple, Union
 
 import numpy as np
 from pyannote.core import Segment, SlidingWindowFeature
@@ -30,7 +30,7 @@ from pyannote.database import Protocol
 import torch
 import torch.nn.functional as F
 from torch_audiomentations.core.transforms_interface import BaseWaveformTransform
-from torchmetrics import Metric
+from torchmetrics import ClasswiseWrapper, Metric
 from torchmetrics.classification import (
     MulticlassAccuracy,
     MulticlassF1Score,
@@ -42,7 +42,7 @@ from pyannote.audio.core.task import Problem, Resolution, Specifications, Task
 from pyannote.audio.tasks.segmentation.mixins import SegmentationTaskMixin
 
 
-class Multiclass(SegmentationTaskMixin, Task):
+class MulticlassSegmentation(SegmentationTaskMixin, Task):
     """Overlapped speech detection
 
     Overlapped speech detection is the task of detecting regions where at least
@@ -105,6 +105,7 @@ class Multiclass(SegmentationTaskMixin, Task):
         augmentation: BaseWaveformTransform = None,
         metric: Union[Metric, Sequence[Metric], Dict[str, Metric]] = None,
         use_powerset: bool = True,
+        label_scope: Literal["global", "database", "file"] = "file",
     ):
         super().__init__(
             protocol,
@@ -121,15 +122,17 @@ class Multiclass(SegmentationTaskMixin, Task):
         self.weight = weight
         self.classes = classes
         self.use_powerset = use_powerset
+        self.label_scope = label_scope
 
         # NEEDS classes to be passed
         print(f"classes: {self.classes}")
         if self.use_powerset:
-            self.classes = [("nothing",)] + [
-                j
-                for i in range(1, len(self.classes)+1)
-                for j in itertools.combinations(self.classes, i)
-            ]
+            powersetclasses = ["nothing"]
+            for simult_class_count in range(1, len(self.classes) + 1):
+                for combination in itertools.combinations(self.classes, simult_class_count):
+                    powersetclasses.append("+".join(combination))
+            self.classes = powersetclasses
+            
             print(f"classes after powerset: {self.classes}")
 
     def setup(self):
@@ -195,21 +198,20 @@ class Multiclass(SegmentationTaskMixin, Task):
         end_idx = np.ceil(end / self.model.example_output.frames.step).astype(int)
 
         # frame-level targets (-1 for un-annotated classes)
-        # TODO: add support for -1s
+        # TODO: add support for -1s
         y = -np.zeros((self.model.example_output.num_frames, 1), dtype=np.int8)
         # y[:, self.annotated_classes[file_id]] = 0
         for start, end, label in zip(
-            start_idx, end_idx, chunk_annotations["global_label_idx"]
+            start_idx, end_idx, chunk_annotations[f"{self.label_scope}_label_idx"]
         ):
-            y[start:end, 0] = label+1
-            # TODO: add support for powerset
+            y[start:end, 0] = label + 1
+            # y[start:end, 0] = 1 # because chunk_annotations["global_label_idx"] is always -1 for some reason
+            # TODO: add support for powerset
 
         sample["y"] = SlidingWindowFeature(y, self.model.example_output.frames)
 
         # print(f"----\n{y.shape=}\n{self.model.example_output=}\n{self.model.example_output.num_frames=}\n{self.model.example_output.frames=}\n{chunk_annotations['global_label_idx']=}\n{chunk_annotations=}\n{start_idx=}\n{end_idx}")
 
-        sample["y"] = y
-        
         metadata = self.metadata[file_id]
         sample["meta"] = {key: metadata[key] for key in metadata.dtype.names}
         sample["meta"]["file"] = file_id
@@ -280,6 +282,10 @@ class Multiclass(SegmentationTaskMixin, Task):
             prog_bar=True,
             logger=True,
         )
+
+        print(self.model.validation_metric)
+        print(self.model.validation_metric.compute())
+
         return {"loss": loss}
 
     def default_metric(self) -> Union[Metric, Sequence[Metric], Dict[str, Metric]]:
@@ -287,5 +293,31 @@ class Multiclass(SegmentationTaskMixin, Task):
             "F1": MulticlassF1Score(num_classes=len(self.classes), average="weighted"),
             "Accuracy": MulticlassAccuracy(
                 num_classes=len(self.classes), average="weighted"
+            ),
+            "Precision": MulticlassPrecision(
+                num_classes=len(self.classes), average="weighted"
+            ),
+            "Recall": MulticlassRecall(
+                num_classes=len(self.classes), average="weighted"
+            ),
+            "ClasswiseF1": ClasswiseWrapper(
+                MulticlassF1Score(num_classes=len(self.classes), average=None),
+                labels=self.classes,
+                postfix="/F1",
+            ),
+            "ClasswiseAccuracy": ClasswiseWrapper(
+                MulticlassAccuracy(num_classes=len(self.classes), average=None),
+                labels=self.classes,
+                postfix="/Accuracy",
+            ),
+            "ClasswisePrecision": ClasswiseWrapper(
+                MulticlassPrecision(num_classes=len(self.classes), average=None),
+                labels=self.classes,
+                postfix="/Precision",
+            ),
+            "ClasswiseRecall": ClasswiseWrapper(
+                MulticlassRecall(num_classes=len(self.classes), average=None),
+                labels=self.classes,
+                postfix="/Recall",
             ),
         }
