@@ -32,10 +32,10 @@ import torch.nn.functional as F
 from torch_audiomentations.core.transforms_interface import BaseWaveformTransform
 from torchmetrics import ClasswiseWrapper, Metric
 from torchmetrics.classification import (
-    MulticlassAccuracy,
-    MulticlassF1Score,
-    MulticlassPrecision,
-    MulticlassRecall,
+    BinaryAccuracy,
+    BinaryF1Score,
+    BinaryPrecision,
+    BinaryRecall,
 )
 
 from pyannote.audio.core.task import Problem, Resolution, Specifications, Task
@@ -262,7 +262,7 @@ class MulticlassSegmentation(SegmentationTaskMixin, Task):
 
         # log global metric (multilabel)
         self.model.validation_metric(
-            y_pred,
+            y_pred.argmax(dim=-1),
             y_true,
         )
         self.model.log_dict(
@@ -287,16 +287,10 @@ class MulticlassSegmentation(SegmentationTaskMixin, Task):
 
     def default_metric(self) -> Union[Metric, Sequence[Metric], Dict[str, Metric]]:
         return {
-            "F1": MulticlassF1Score(num_classes=len(self.classes), average="micro"),
-            "Accuracy": MulticlassAccuracy(
-                num_classes=len(self.classes), average="micro"
-            ),
-            "Precision": MulticlassPrecision(
-                num_classes=len(self.classes), average="micro"
-            ),
-            "Recall": MulticlassRecall(
-                num_classes=len(self.classes), average="micro"
-            ),
+            f"{self.classes[1]}/F1": BinaryF1Score(),
+            f"{self.classes[1]}/Accuracy": BinaryAccuracy(),
+            f"{self.classes[1]}/Precision": BinaryPrecision(),
+            f"{self.classes[1]}/Recall": BinaryRecall(),
             # "ClasswiseF1": ClasswiseWrapper(
             #     MulticlassF1Score(num_classes=len(self.classes), average=None),
             #     labels=self.classes,
