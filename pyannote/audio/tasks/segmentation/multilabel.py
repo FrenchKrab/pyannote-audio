@@ -21,7 +21,7 @@
 # SOFTWARE.
 
 from functools import cached_property
-from typing import Dict, List, Optional, Sequence, Text, Tuple, Union
+from typing import Dict, List, Literal, Optional, Sequence, Text, Tuple, Union
 from einops import rearrange
 
 import numpy as np
@@ -102,6 +102,7 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
         augmentation: BaseWaveformTransform = None,
         metric: Union[Metric, Sequence[Metric], Dict[str, Metric]] = None,
         metric_classwise: Union[Metric, Sequence[Metric], Dict[str, Metric]] = None,
+        label_scope: Literal["file", "database", "global"] = "global",
     ):
         if not isinstance(protocol, SegmentationProtocol):
             raise ValueError(
@@ -123,6 +124,7 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
         self.weight = weight
         self.classes = classes
         self._metric_classwise = metric_classwise
+        self.label_scope = label_scope
 
         # task specification depends on the data: we do not know in advance which
         # classes should be detected. therefore, we postpone the definition of
@@ -197,7 +199,7 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
         )
         y[:, self.annotated_classes[file_id]] = 0
         for start, end, label in zip(
-            start_idx, end_idx, chunk_annotations["global_label_idx"]
+            start_idx, end_idx, chunk_annotations[f"{self.label_scope}_label_idx"]
         ):
             y[start:end, label] = 1
 

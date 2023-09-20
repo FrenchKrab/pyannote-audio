@@ -283,41 +283,38 @@ class MulticlassSegmentation(SegmentationTaskMixin, Task):
             logger=True,
         )
 
-        print(self.model.validation_metric)
-        print(self.model.validation_metric.compute())
-
         return {"loss": loss}
 
     def default_metric(self) -> Union[Metric, Sequence[Metric], Dict[str, Metric]]:
         return {
-            "F1": MulticlassF1Score(num_classes=len(self.classes), average="weighted"),
+            "F1": MulticlassF1Score(num_classes=len(self.classes), average="micro"),
             "Accuracy": MulticlassAccuracy(
-                num_classes=len(self.classes), average="weighted"
+                num_classes=len(self.classes), average="micro"
             ),
             "Precision": MulticlassPrecision(
-                num_classes=len(self.classes), average="weighted"
+                num_classes=len(self.classes), average="micro"
             ),
             "Recall": MulticlassRecall(
-                num_classes=len(self.classes), average="weighted"
+                num_classes=len(self.classes), average="micro"
             ),
-            "ClasswiseF1": ClasswiseWrapper(
-                MulticlassF1Score(num_classes=len(self.classes), average=None),
-                labels=self.classes,
-                postfix="/F1",
-            ),
-            "ClasswiseAccuracy": ClasswiseWrapper(
-                MulticlassAccuracy(num_classes=len(self.classes), average=None),
-                labels=self.classes,
-                postfix="/Accuracy",
-            ),
-            "ClasswisePrecision": ClasswiseWrapper(
-                MulticlassPrecision(num_classes=len(self.classes), average=None),
-                labels=self.classes,
-                postfix="/Precision",
-            ),
-            "ClasswiseRecall": ClasswiseWrapper(
-                MulticlassRecall(num_classes=len(self.classes), average=None),
-                labels=self.classes,
-                postfix="/Recall",
-            ),
+            # "ClasswiseF1": ClasswiseWrapper(
+            #     MulticlassF1Score(num_classes=len(self.classes), average=None),
+            #     labels=self.classes,
+            #     postfix="/F1",
+            # ),
+            # "ClasswiseAccuracy": ClasswiseWrapper(
+            #     MulticlassAccuracy(num_classes=len(self.classes), average=None),
+            #     labels=self.classes,
+            #     postfix="/Accuracy",
+            # ),
+            # "ClasswisePrecision": ClasswiseWrapper(
+            #     MulticlassPrecision(num_classes=len(self.classes), average=None),
+            #     labels=self.classes,
+            #     postfix="/Precision",
+            # ),
+            # "ClasswiseRecall": ClasswiseWrapper(
+            #     MulticlassRecall(num_classes=len(self.classes), average=None),
+            #     labels=self.classes,
+            #     postfix="/Recall",
+            # ),
         }
