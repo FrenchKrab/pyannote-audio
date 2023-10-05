@@ -197,8 +197,9 @@ class SegmentationTaskMixin:
                         f"Ignoring '{key}' metadata because of its type ({type(value)}). Only str and int are supported for now.",
                         category=UserWarning,
                     )
-
-            metadata.append(metadatum)
+            
+            if file["subset"] == "train":
+                metadata.append(metadatum)
 
             database_unique_labels = list()
 
@@ -423,6 +424,8 @@ class SegmentationTaskMixin:
         for key, value in filters.items():
             training &= self.metadata[key] == self.metadata_unique_values[key].index(value)
         file_ids = np.where(training)[0]
+        if file_ids.sum() == 0:
+            yield None
 
         # turn annotated duration into a probability distribution
         annotated_duration = self.annotated_duration[file_ids]
@@ -491,7 +494,11 @@ class SegmentationTaskMixin:
                 # eg: for balance=["database", "split"], with 2 databases and 2 splits:
                 # ("DIHARD", "A"), ("DIHARD", "B"), ("REPERE", "A"), ("REPERE", "B")
                 filters = {key: value for key, value in zip(balance, product)}
-                subchunks[product] = self.train__iter__helper(rng, **filters)
+                product_iterator = self.train__iter__helper(rng, **filters)
+                # This specific product may not exist. For example, if balance=['database']
+                # and there is a database that's not present in the training set.
+                if next(product_iterator) is not None:
+                    subchunks[product] = product_iterator
 
         while True:
             # select one subchunk generator at random (with uniform probability)
