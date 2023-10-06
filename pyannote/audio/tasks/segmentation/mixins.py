@@ -198,8 +198,7 @@ class SegmentationTaskMixin:
                         category=UserWarning,
                     )
             
-            if file["subset"] == "train":
-                metadata.append(metadatum)
+            metadata.append(metadatum)
 
             database_unique_labels = list()
 
