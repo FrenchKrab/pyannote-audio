@@ -33,7 +33,15 @@ def _der_update(
     preds: torch.Tensor,
     target: torch.Tensor,
     threshold: Union[torch.Tensor, float] = 0.5,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
     """Compute components of diarization error rate
 
     Parameters
@@ -87,8 +95,15 @@ def _der_update(
     speaker_confusion = torch.sum((hypothesis != target) * hypothesis, 1) - false_alarm
     # (batch_size, num_frames, num_thresholds)
 
+    overlapped = (torch.sum(target, 1) > 1).float()
+    # (batch_size, num_frames)
+
+    # watchout with the order here, _ov need to be computed first
+    false_alarm_ov = torch.sum(torch.sum(false_alarm * overlapped, 1), 0)
     false_alarm = torch.sum(torch.sum(false_alarm, 1), 0)
+    missed_detection_ov = torch.sum(torch.sum(missed_detection * overlapped, 1), 0)
     missed_detection = torch.sum(torch.sum(missed_detection, 1), 0)
+    speaker_confusion_ov = torch.sum(torch.sum(speaker_confusion * overlapped, 1), 0)
     speaker_confusion = torch.sum(torch.sum(speaker_confusion, 1), 0)
     # (num_thresholds, )
 
@@ -96,10 +111,21 @@ def _der_update(
 
     if scalar_threshold:
         false_alarm = false_alarm[0]
+        false_alarm_ov = false_alarm_ov[0]
         missed_detection = missed_detection[0]
+        missed_detection_ov = missed_detection_ov[0]
         speaker_confusion = speaker_confusion[0]
+        speaker_confusion_ov = speaker_confusion_ov[0]
 
-    return false_alarm, missed_detection, speaker_confusion, speech_total
+    return (
+        false_alarm,
+        false_alarm_ov,
+        missed_detection,
+        missed_detection_ov,
+        speaker_confusion,
+        speaker_confusion_ov,
+        speech_total,
+    )
 
 
 def _der_compute(

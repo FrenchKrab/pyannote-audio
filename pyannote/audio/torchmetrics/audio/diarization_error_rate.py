@@ -55,11 +55,18 @@ class DiarizationErrorRate(Metric):
         self.threshold = threshold
 
         self.add_state("false_alarm", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("false_alarm_ov", default=torch.tensor(0.0), dist_reduce_fx="sum")
         self.add_state(
             "missed_detection", default=torch.tensor(0.0), dist_reduce_fx="sum"
         )
         self.add_state(
+            "missed_detection_ov", default=torch.tensor(0.0), dist_reduce_fx="sum"
+        )
+        self.add_state(
             "speaker_confusion", default=torch.tensor(0.0), dist_reduce_fx="sum"
+        )
+        self.add_state(
+            "speaker_confusion_ov", default=torch.tensor(0.0), dist_reduce_fx="sum"
         )
         self.add_state("speech_total", default=torch.tensor(0.0), dist_reduce_fx="sum")
 
@@ -86,12 +93,21 @@ class DiarizationErrorRate(Metric):
             Diarization error rate components accumulated over the whole batch.
         """
 
-        false_alarm, missed_detection, speaker_confusion, speech_total = _der_update(
-            preds, target, threshold=self.threshold
-        )
+        (
+            false_alarm,
+            false_alarm_ov,
+            missed_detection,
+            missed_detection_ov,
+            speaker_confusion,
+            speaker_confusion_ov,
+            speech_total,
+        ) = _der_update(preds, target, threshold=self.threshold)
         self.false_alarm += false_alarm
+        self.false_alarm_ov += false_alarm_ov
         self.missed_detection += missed_detection
+        self.missed_detection_ov += missed_detection_ov
         self.speaker_confusion += speaker_confusion
+        self.speaker_confusion_ov += speaker_confusion_ov
         self.speech_total += speech_total
 
     def compute(self):
@@ -107,15 +123,25 @@ class SpeakerConfusionRate(DiarizationErrorRate):
     def compute(self):
         return self.speaker_confusion / (self.speech_total + 1e-8)
 
+class SpeakerConfusionRateOverlap(DiarizationErrorRate):
+    def compute(self):
+        return self.speaker_confusion_ov / (self.speech_total + 1e-8)
 
 class FalseAlarmRate(DiarizationErrorRate):
     def compute(self):
         return self.false_alarm / (self.speech_total + 1e-8)
 
+class FalseAlarmRateOverlap(DiarizationErrorRate):
+    def compute(self):
+        return self.false_alarm_ov / (self.speech_total + 1e-8)
 
 class MissedDetectionRate(DiarizationErrorRate):
     def compute(self):
         return self.missed_detection / (self.speech_total + 1e-8)
+
+class MissedDetectionRateOverlap(DiarizationErrorRate):
+    def compute(self):
+        return self.missed_detection_ov / (self.speech_total + 1e-8)
 
 
 class OptimalDiarizationErrorRate(Metric):
@@ -149,17 +175,32 @@ class OptimalDiarizationErrorRate(Metric):
         # for which only one threshold is used.
 
         self.add_state(
-            "FalseAlarm",
+            "false_alarm",
             default=torch.zeros((num_thresholds,)),
             dist_reduce_fx="sum",
         )
         self.add_state(
-            "MissedDetection",
+            "false_alarm_ov",
             default=torch.zeros((num_thresholds,)),
             dist_reduce_fx="sum",
         )
         self.add_state(
-            "SpeakerConfusion",
+            "missed_detection",
+            default=torch.zeros((num_thresholds,)),
+            dist_reduce_fx="sum",
+        )
+        self.add_state(
+            "missed_detection_ov",
+            default=torch.zeros((num_thresholds,)),
+            dist_reduce_fx="sum",
+        )
+        self.add_state(
+            "speaker_confusion",
+            default=torch.zeros((num_thresholds,)),
+            dist_reduce_fx="sum",
+        )
+        self.add_state(
+            "speaker_confusion_ov",
             default=torch.zeros((num_thresholds,)),
             dist_reduce_fx="sum",
         )
@@ -188,19 +229,37 @@ class OptimalDiarizationErrorRate(Metric):
             Diarization error rate components accumulated over the whole batch.
         """
 
-        false_alarm, missed_detection, speaker_confusion, speech_total = _der_update(
-            preds, target, threshold=self.threshold
-        )
-        self.FalseAlarm += false_alarm
-        self.MissedDetection += missed_detection
-        self.SpeakerConfusion += speaker_confusion
+        (
+            false_alarm,
+            false_alarm_ov,
+            missed_detection,
+            missed_detection_ov,
+            speaker_confusion,
+            speaker_confusion_ov,
+            speech_total,
+        ) = _der_update(preds, target, threshold=self.threshold)
+        self.false_alarm += false_alarm
+        self.false_alarm_ov += false_alarm_ov
+        self.missed_detection += missed_detection
+        self.missed_detection_ov += missed_detection_ov
+        self.speaker_confusion += speaker_confusion
+        self.speaker_confusion_ov += speaker_confusion_ov
         self.speech_total += speech_total
+
+
+        # false_alarm, missed_detection, speaker_confusion, speech_total = _der_update(
+        #     preds, target, threshold=self.threshold
+        # )
+        # self.FalseAlarm += false_alarm
+        # self.MissedDetection += missed_detection
+        # self.SpeakerConfusion += speaker_confusion
+        # self.speech_total += speech_total
 
     def compute(self):
         der = _der_compute(
-            self.FalseAlarm,
-            self.MissedDetection,
-            self.SpeakerConfusion,
+            self.false_alarm,
+            self.missed_detection,
+            self.speaker_confusion,
             self.speech_total,
         )
         opt_der, _ = torch.min(der, dim=0)
