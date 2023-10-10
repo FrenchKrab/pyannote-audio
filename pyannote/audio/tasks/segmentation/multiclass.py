@@ -312,3 +312,7 @@ class MulticlassSegmentation(SegmentationTaskMixin, Task):
             #     postfix="/Recall",
             # ),
         }
+
+    @property
+    def val_monitor(self):
+        return "loss/val", "min"
