@@ -429,6 +429,8 @@ class SegmentationTaskMixin:
         # turn annotated duration into a probability distribution
         annotated_duration = self.annotated_duration[file_ids]
         annotated_duration = np.nan_to_num(annotated_duration, nan=0.0, copy=True)   # in case there is a 0 seconds annotated region somewhere
+        if np.sum(annotated_duration) == 0:
+            yield None
         prob_annotated_duration: np.ndarray = annotated_duration / np.sum(annotated_duration)
 
         duration = self.duration
