@@ -107,6 +107,9 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
     augmentation : BaseWaveformTransform, optional
         torch_audiomentations waveform transform, used by dataloader
         during training.
+    use_ctc_loss : bool, optional
+        Use CTC loss instead of (binary) cross-entropy loss.
+        For now, the blank token is the last class in the powerset.
     vad_loss : {"bce", "mse"}, optional
         Add voice activity detection loss.
         Cannot be used in conjunction with `max_speakers_per_frame`.
