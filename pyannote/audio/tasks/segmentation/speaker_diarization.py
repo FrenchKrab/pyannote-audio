@@ -575,7 +575,8 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
                 # (batch_size, num_frames) both
                 collapsed_target, ct_indices = unique_consecutive_padded(perm_target_powerset.argmax(dim=-1), return_indices=True)
                 # (batch_size)
-                target_lengths, _ = torch.max(ct_indices, dim=-1) + 1
+                target_lengths, _ = torch.max(ct_indices, dim=-1)
+                target_lengths += 1
 
                 ctc = ctc_loss_fn(
                     prediction.permute(1, 0, 2),
