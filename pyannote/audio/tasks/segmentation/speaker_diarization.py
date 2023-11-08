@@ -564,7 +564,7 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
             blank_id = self.model.powerset.num_powerset_classes-1
             ctc_loss_fn = torch.nn.CTCLoss(blank=blank_id)
 
-            best_ctc = torch.ones(size=(1,)) * torch.inf
+            best_ctc = torch.ones(size=(1,), device=prediction.device) * torch.inf
             for permutation in itertools.permutations(range(target.shape[-1]), target.shape[-1]):
                 perm_target = target[:, :, permutation]
                 perm_target_powerset = self.model.powerset.to_powerset(
