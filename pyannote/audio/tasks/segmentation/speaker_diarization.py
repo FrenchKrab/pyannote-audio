@@ -20,6 +20,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+import itertools
 import math
 import warnings
 from collections import Counter
@@ -53,6 +54,8 @@ from pyannote.audio.torchmetrics import (
 from pyannote.audio.utils.loss import binary_cross_entropy, mse_loss, nll_loss
 from pyannote.audio.utils.permutation import permutate
 from pyannote.audio.utils.powerset import Powerset
+
+from zayrunner.utils.torch import unique_consecutive_padded
 
 Subsets = list(Subset.__args__)
 Scopes = list(Scope.__args__)
@@ -138,6 +141,7 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
         num_workers: int = None,
         pin_memory: bool = False,
         augmentation: BaseWaveformTransform = None,
+        use_ctc_loss: bool = False,
         vad_loss: Literal["bce", "mse"] = None,
         metric: Union[Metric, Sequence[Metric], Dict[str, Metric]] = None,
         max_num_speakers: int = None,  # deprecated in favor of `max_speakers_per_chunk``
@@ -178,7 +182,8 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
                 raise ValueError(
                     "`vad_loss` cannot be used jointly with `max_speakers_per_frame`"
                 )
-
+        
+        self.use_ctc_loss = use_ctc_loss
         self.max_speakers_per_chunk = max_speakers_per_chunk
         self.max_speakers_per_frame = max_speakers_per_frame
         self.weigh_by_cardinality = weigh_by_cardinality
@@ -548,14 +553,38 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
         warm_up_right = round(self.warm_up[1] / self.duration * num_frames)
         weight[:, num_frames - warm_up_right :] = 0.0
 
-        if self.specifications.powerset:
+        if self.use_ctc_loss:
+            ctc_loss_fn = torch.nn.CTCLoss(blank=self.model.powerset.num_powerset_classes-1)
+
+            best_ctc = torch.ones(size=(1,)) * torch.inf
+            for permutation in itertools.permutations(range(target.shape[-1]), target.shape[-1]):
+                perm_target = target[:, :, permutation]
+                perm_target_powerset = self.model.powerset.to_powerset(
+                    perm_target.float()
+                )
+                # (batch_size, num_frames) both
+                collapsed_target, ct_indices = unique_consecutive_padded(perm_target_powerset.argmax(dim=-1), return_indices=True)
+                # (batch_size)
+                target_lengths, _ = torch.max(ct_indices, dim=-1) + 1
+
+                ctc = ctc_loss_fn(
+                    prediction.permute(1, 0, 2),
+                    collapsed_target,
+                    torch.ones(size=(batch_size,), dtype=torch.long) * num_frames,
+                    target_lengths
+                )
+                best_ctc = torch.min(best_ctc, ctc)
+
+            seg_loss = best_ctc
+
+        elif self.specifications.powerset:
             multilabel = self.model.powerset.to_multilabel(prediction)
-            permutated_target, _ = permutate(multilabel, target)
-            permutated_target_powerset = self.model.powerset.to_powerset(
-                permutated_target.float()
+            perm_target, _ = permutate(multilabel, target)
+            perm_target_powerset = self.model.powerset.to_powerset(
+                perm_target.float()
             )
             seg_loss = self.segmentation_loss(
-                prediction, permutated_target_powerset, weight=weight
+                prediction, perm_target_powerset, weight=weight
             )
 
         else:
@@ -581,7 +610,7 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
             # because first class (empty set of labels) does exactly this...
             if self.specifications.powerset:
                 vad_loss = self.voice_activity_detection_loss(
-                    prediction, permutated_target_powerset, weight=weight
+                    prediction, perm_target_powerset, weight=weight
                 )
 
             else:
