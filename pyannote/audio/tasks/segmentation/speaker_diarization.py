@@ -561,7 +561,8 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
         weight[:, num_frames - warm_up_right :] = 0.0
 
         if self.use_ctc_loss:
-            ctc_loss_fn = torch.nn.CTCLoss(blank=self.model.powerset.num_powerset_classes-1)
+            blank_id = self.model.powerset.num_powerset_classes-1
+            ctc_loss_fn = torch.nn.CTCLoss(blank=blank_id)
 
             best_ctc = torch.ones(size=(1,)) * torch.inf
             for permutation in itertools.permutations(range(target.shape[-1]), target.shape[-1]):
@@ -569,6 +570,8 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
                 perm_target_powerset = self.model.powerset.to_powerset(
                     perm_target.float()
                 )
+                perm_target_cids = perm_target_powerset.argmax(dim=-1)
+                perm_target_cids[perm_target_cids == blank_id] = blank_id-1 # dirty hack to avoid blank token in the target
                 # (batch_size, num_frames) both
                 collapsed_target, ct_indices = unique_consecutive_padded(perm_target_powerset.argmax(dim=-1), return_indices=True)
                 # (batch_size)
