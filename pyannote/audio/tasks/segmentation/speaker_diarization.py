@@ -182,7 +182,11 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
                 raise ValueError(
                     "`vad_loss` cannot be used jointly with `max_speakers_per_frame`"
                 )
-        
+        if use_ctc_loss and max_speakers_per_frame is None:
+            raise ValueError(
+                "TEMP: `use_ctc_loss` must be used with powerset encoding for now."
+            )
+
         self.use_ctc_loss = use_ctc_loss
         self.max_speakers_per_chunk = max_speakers_per_chunk
         self.max_speakers_per_frame = max_speakers_per_frame
