@@ -582,7 +582,7 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
                     perm_target_cids = perm_target_powerset.argmax(dim=-1)
                     perm_target_cids[perm_target_cids == blank_id] = blank_id-1 # dirty hack to avoid blank token in the target
                     # (batch_size, num_frames) both
-                    collapsed_target, ct_indices = unique_consecutive_padded(perm_target_powerset.argmax(dim=-1), return_indices=True)
+                    collapsed_target, ct_indices = unique_consecutive_padded(perm_target_cids, return_indices=True)
                     # (batch_size)
                     target_lengths, _ = torch.max(ct_indices, dim=-1)
                     target_lengths += 1
