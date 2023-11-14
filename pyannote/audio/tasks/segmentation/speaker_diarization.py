@@ -113,6 +113,8 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
     vad_loss : {"bce", "mse"}, optional
         Add voice activity detection loss.
         Cannot be used in conjunction with `max_speakers_per_frame`.
+    vad_loss_weight : float, optional
+        The VAD loss will be multiplied by this factor for the final loss. Defaults to 1.0.
     metric : optional
         Validation metric(s). Can be anything supported by torchmetrics.MetricCollection.
         Defaults to AUROC (area under the ROC curve).
@@ -146,6 +148,7 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
         augmentation: BaseWaveformTransform = None,
         use_ctc_loss: bool = False,
         vad_loss: Literal["bce", "mse"] = None,
+        vad_loss_weight: float = 1.0,
         metric: Union[Metric, Sequence[Metric], Dict[str, Metric]] = None,
         max_num_speakers: int = None,  # deprecated in favor of `max_speakers_per_chunk``
         loss: Literal["bce", "mse"] = None,  # deprecated
@@ -197,6 +200,7 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
         self.balance = balance
         self.weight = weight
         self.vad_loss = vad_loss
+        self.vad_loss_weight = vad_loss_weight
 
     def setup(self):
         super().setup()
@@ -655,10 +659,11 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
                 logger=True,
             )
 
-        loss = seg_loss + vad_loss
+        loss = seg_loss + self.vad_loss_weight * vad_loss
 
         # skip batch if something went wrong for some reason
         if torch.isnan(loss):
+            raise Exception("NaN loss")
             return None
 
         self.model.log(
