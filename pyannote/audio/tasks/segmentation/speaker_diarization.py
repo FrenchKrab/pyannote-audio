@@ -924,6 +924,11 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
 
         plt.close(fig)
 
+    @property
+    def val_monitor(self):
+        return ("CTC/edit_distance", "min") if self.use_ctc_loss else super().val_monitor
+
+
 
 def main(protocol: str, subset: str = "test", model: str = "pyannote/segmentation"):
     """Evaluate a segmentation model"""
