@@ -1,4 +1,4 @@
-from typing import Self, Sequence, Union
+from typing import Sequence, Union
 import torch
 from torchmetrics.text import EditDistance
 from zayrunner.utils.torch import unique_consecutive_padded
