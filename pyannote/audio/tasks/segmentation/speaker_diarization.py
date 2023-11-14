@@ -51,6 +51,7 @@ from pyannote.audio.torchmetrics import (
     OptimalSpeakerConfusionRate,
     SpeakerConfusionRate,
 )
+from pyannote.audio.torchmetrics.text.TensorEditDistance import TensorEditDistance
 from pyannote.audio.utils.loss import binary_cross_entropy, mse_loss, nll_loss
 from pyannote.audio.utils.permutation import permutate
 from pyannote.audio.utils.powerset import Powerset
@@ -304,6 +305,10 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
             self.model.powerset = Powerset(
                 len(self.specifications.classes),
                 self.specifications.powerset_max_classes,
+            )
+
+            self.model.metric_edit_distance = TensorEditDistance(
+                blank_token=self.model.powerset.num_powerset_classes - 1
             )
 
     def prepare_chunk(self, file_id: int, start_time: float, duration: float):
@@ -814,6 +819,21 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
                     target[:, warm_up_left : num_frames - warm_up_right], 1, 2
                 ),
             )
+
+            self.model.metric_edit_distance(
+                prediction.argmax(dim=-1),
+                permutated_target_powerset.argmax(dim=-1),
+            )
+
+            self.model.log(
+                "CTC/edit_distance",
+                self.model.metric_edit_distance,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+            )
+            
         else:
             self.model.validation_metric(
                 torch.transpose(
