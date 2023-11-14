@@ -824,16 +824,6 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
                 prediction.argmax(dim=-1),
                 permutated_target_powerset.argmax(dim=-1),
             )
-
-            self.model.log(
-                "CTC/edit_distance",
-                self.model.metric_edit_distance,
-                on_step=False,
-                on_epoch=True,
-                prog_bar=True,
-                logger=True,
-            )
-            
         else:
             self.model.validation_metric(
                 torch.transpose(
@@ -843,6 +833,15 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
                     target[:, warm_up_left : num_frames - warm_up_right], 1, 2
                 ),
             )
+            # self.model.metric_edit_distance(
+            #     self.model.powerset.to_powerset(
+            #         permutated_prediction[:, warm_up_left : num_frames - warm_up_right]
+            #     ).argmax(dim=-1),
+            #     self.model.powerset.to_powerset(
+            #         target[:, warm_up_left : num_frames - warm_up_right]
+            #     ).argmax(dim=-1),
+            # )
+            
 
         self.model.log_dict(
             self.model.validation_metric,
@@ -909,6 +908,19 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
             ax_hyp.set_ylim(-0.1, 1.1)
             ax_hyp.set_xlim(0, len(sample_y))
             ax_hyp.get_xaxis().set_visible(False)
+            
+            if self.specifications.powerset:
+                collapsed_y = unique_consecutive_padded(permutated_target_powerset[sample_idx].argmax(dim=-1))
+                collapsed_y = collapsed_y[collapsed_y != -1]
+
+                collapsed_y_pred = unique_consecutive_padded(prediction[sample_idx].argmax(dim=-1))
+                collapsed_y_pred = collapsed_y_pred[(collapsed_y_pred != -1) & (collapsed_y_pred != self.model.powerset.num_powerset_classes-1)]
+
+                str_y = ".".join([str(x) for x in collapsed_y.tolist()])
+                str_y_pred = ".".join([str(x) for x in collapsed_y_pred.tolist()])
+
+                ax_ref.text(0.1,0.8, str_y)
+                ax_hyp.text(0.1,0.2, str_y_pred)
 
         plt.tight_layout()
 
