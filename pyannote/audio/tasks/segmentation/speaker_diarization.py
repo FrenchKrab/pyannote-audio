@@ -824,6 +824,15 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
                 prediction.argmax(dim=-1),
                 permutated_target_powerset.argmax(dim=-1),
             )
+
+            self.model.log(
+                "CTC/edit_distance",
+                self.model.metric_edit_distance,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+            )
         else:
             self.model.validation_metric(
                 torch.transpose(
@@ -982,3 +991,13 @@ if __name__ == "__main__":
     import typer
 
     typer.run(main)
+
+
+            self.model.log(
+                "CTC/edit_distance",
+                self.model.metric_edit_distance,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+            )
