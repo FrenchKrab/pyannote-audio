@@ -991,13 +991,3 @@ if __name__ == "__main__":
     import typer
 
     typer.run(main)
-
-
-            self.model.log(
-                "CTC/edit_distance",
-                self.model.metric_edit_distance,
-                on_step=False,
-                on_epoch=True,
-                prog_bar=True,
-                logger=True,
-            )
