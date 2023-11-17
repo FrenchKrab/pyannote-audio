@@ -684,14 +684,15 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
                 logger=True,
             )
 
+        vad_loss_data_filter = self.losses_data_filters["vad"](
+            batch, self.metadata_unique_values
+        )
+        vad_loss_file_count = vad_loss_data_filter.sum()
         vad_loss = 0.0
-        if self.loss_enabled('vad'):
+        if self.loss_enabled('vad') and vad_loss_file_count > 0:
             # TODO: vad_loss probably does not make sense in powerset mode
             # because first class (empty set of labels) does exactly this...
             if self.specifications.powerset:
-                vad_loss_data_filter = self.losses_data_filters["vad"](
-                    batch, self.metadata_unique_values
-                )
                 # vad_loss = self.voice_activity_detection_loss(
                 #     prediction, perm_target_powerset, weight=weight
                 # )
@@ -705,8 +706,8 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
                 # (batch_size, num_frames)
 
                 vad_loss = torch.nn.functional.binary_cross_entropy(
-                    vad_prediction,
-                    vad_target,
+                    vad_prediction[vad_loss_data_filter],
+                    vad_target[vad_loss_data_filter],
                     # weight=weight[...,0],
                 )
 
@@ -724,7 +725,6 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
                 logger=True,
             )
 
-        print(f"seg_loss: {seg_loss}, vad_loss: {vad_loss}, ctc_loss: {ctc_loss}")
         loss = (
             self.losses_weights["seg"] * seg_loss
             + self.losses_weights["vad"] * vad_loss
