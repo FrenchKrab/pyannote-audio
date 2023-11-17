@@ -195,7 +195,7 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
 
         # initialize the dictionary of data filters
         self.losses_data_filters: dict[str, Callable[[dict, dict], torch.Tensor]] = {
-            k: __class__._identity_data_filter for k in ["segmentation", "ctc", "vad"]
+            k: __class__._identity_data_filter for k in ["seg", "ctc", "vad"]
         }
         if losses_data_filters is not None:
             self.losses_data_filters.update(losses_data_filters)
