@@ -136,10 +136,11 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
 
     """
 
-    DEFAULT_LOSSES_WEIGHTS = {
+    DEFAULT_LOSSES_WEIGHTS = lambda _: {
         "seg": 1.0,
         "vad": 0.0,
         "ctc": 0.0,
+        "antiblank": 0.0,
     }
 
     def __init__(
@@ -188,18 +189,28 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
         if loss is not None:
             warnings.warn("`loss` has been deprecated and has no effect.")
 
-        # initialize the dictionary of losses weights
-        self.losses_weights = self.DEFAULT_LOSSES_WEIGHTS.copy()
+        # initialize the dictionary of losses weights
+        self.losses_weights = self.DEFAULT_LOSSES_WEIGHTS().copy()
         if losses_weights is not None:
+            if len(set(losses_weights.keys()) - set(self.losses_weights.keys())) > 0:
+                raise ValueError(
+                    f"Unknown loss name. Valid loss names are {list(self.losses_weights.keys())}."
+                )
             self.losses_weights.update(losses_weights)
+        
 
         # initialize the dictionary of data filters
         self.losses_data_filters: dict[str, Callable[[dict, dict], torch.Tensor]] = {
-            k: __class__._identity_data_filter for k in ["seg", "ctc", "vad"]
+            k: __class__._identity_data_filter for k in self.losses_weights.keys()
         }
         if losses_data_filters is not None:
-            self.losses_data_filters.update(losses_data_filters)
-
+            for k, v in losses_data_filters.items():
+                if k not in self.losses_data_filters:
+                    raise ValueError(
+                        f"Unknown loss name {k}. Valid loss names are {list(self.losses_data_filters.keys())}."
+                    )
+                if isinstance(v, Callable):
+                    self.losses_data_filters[k] = v
 
         # parameter validation
         if max_speakers_per_frame is not None:
@@ -207,14 +218,12 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
                 raise ValueError(
                     f"`max_speakers_per_frame` must be 1 or more (you used {max_speakers_per_frame})."
                 )
-            if vad_loss is not None and not self.loss_enabled('ctc'):
+            if vad_loss is not None and not self.loss_enabled("ctc"):
                 raise ValueError(
                     "`vad_loss` cannot be used jointly with `max_speakers_per_frame`"
                 )
-        if self.loss_enabled('ctc') and max_speakers_per_frame is None:
-            raise ValueError(
-                "TEMP: CTC must be used with powerset encoding for now."
-            )
+        if self.loss_enabled("ctc") and max_speakers_per_frame is None:
+            raise ValueError("TEMP: CTC must be used with powerset encoding for now.")
 
         self.max_speakers_per_chunk = max_speakers_per_chunk
         self.max_speakers_per_frame = max_speakers_per_frame
@@ -223,7 +232,6 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
         self.weight = weight
         self.vad_loss = vad_loss
 
-
     def _identity_data_filter(
         batch: dict, metadata_unique_values: dict
     ) -> torch.Tensor:
@@ -231,9 +239,8 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
             batch["y"].shape[0], dtype=torch.bool, device=batch["y"].device
         )
 
-    def loss_enabled(self, loss_name: Literal['seg', 'ctc', 'vad']):
+    def loss_enabled(self, loss_name: Literal["seg", "ctc", "vad"]):
         return self.losses_weights[loss_name] > 0.0
-
 
     def setup(self):
         super().setup()
@@ -549,6 +556,88 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
 
         return loss
 
+    def _vad_loss_alt(
+        self, prediction: torch.Tensor, target: torch.Tensor, weight: torch.Tensor
+    ) -> torch.Tensor:
+        """Alternative vad loss for powerset prediction with blank token as last class
+
+        Parameters
+        ----------
+        prediction : torch.Tensor
+            Powerset prediction, where 0=nonspeech and -1=blank token
+        target : torch.Tensor
+            Multilabel target
+        weight : torch.Tensor
+            Weights
+
+        Returns
+        -------
+        torch.Tensor
+            VAD loss
+        """
+        prediction_exp = prediction.exp()
+        vad_prediction = torch.concat(
+            [
+                prediction_exp[..., 0:1],
+                torch.sum(prediction_exp[..., 1:-1], dim=-1, keepdim=True),
+            ],
+            dim=-1,
+        )
+        # (batch_size, num_frames, 2) where last dim = (non-speech, speech)
+
+        vad_target, _ = torch.max(target.float(), dim=-1, keepdim=False)
+        vad_target = torch.cat(
+            [
+                (vad_target[..., None] - 1).abs(),
+                vad_target[..., None],
+            ], dim=-1
+        )
+        # (batch_size, num_frames, 2) where last dim = (non-speech, speech)
+
+        return torch.nn.functional.binary_cross_entropy(
+            vad_prediction,
+            vad_target,
+            weight=weight,
+        )
+
+    def _ctc_loss(
+        self,
+        prediction: torch.Tensor,
+        target_multilabel: torch.Tensor,
+        blank_id: int,
+    ):
+        ctc_loss_fn = torch.nn.CTCLoss(blank=blank_id)
+
+        # find best permutation for CTC, because we wouldn't be able to use permutate
+        # with pure CTC annotations.
+        best_ctc = torch.ones(size=(1,), device=target_multilabel.device) * torch.inf
+        for permutation in itertools.permutations(
+            range(target_multilabel.shape[-1]), target_multilabel.shape[-1]
+        ):
+            ps: Powerset = self.model.powerset
+
+            ctc_perm_target_ml = target_multilabel[..., permutation]
+            ctc_perm_target_ps = ps.to_powerset(ctc_perm_target_ml.float())
+            ctc_perm_targets_cids = ctc_perm_target_ps.argmax(dim=-1)
+
+            # (batch_size, num_frames) both
+            collapsed_target, ct_indices = unique_consecutive_padded(
+                ctc_perm_targets_cids, return_indices=True
+            )
+            # (batch_size)
+            target_lengths, _ = torch.max(ct_indices, dim=-1)
+            target_lengths += 1
+
+            ctc = ctc_loss_fn(
+                prediction.permute(1, 0, 2),
+                collapsed_target,
+                torch.ones((prediction.shape[0],), dtype=torch.long)
+                * prediction.shape[1],
+                target_lengths,
+            )
+            best_ctc = torch.min(best_ctc, ctc)
+        return best_ctc
+
     def training_step(self, batch, batch_idx: int):
         """Compute permutation-invariant segmentation loss
 
@@ -600,69 +689,82 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
         warm_up_right = round(self.warm_up[1] / self.duration * num_frames)
         weight[:, num_frames - warm_up_right :] = 0.0
 
-        seg_files_mask = self.losses_data_filters["seg"](
+        seg_fmask = self.losses_data_filters["seg"](batch, self.metadata_unique_values)
+        seg_fcount = seg_fmask.sum()
+
+        vad_fmask = self.losses_data_filters["vad"](batch, self.metadata_unique_values)
+        vad_fcount = vad_fmask.sum()
+
+        ctc_fmask = self.losses_data_filters["ctc"](batch, self.metadata_unique_values)
+        ctc_fcount = ctc_fmask.sum()
+
+        antiblank_fmask = self.losses_data_filters["antiblank"](
             batch, self.metadata_unique_values
         )
-        seg_file_count = seg_files_mask.sum()
+        antiblank_fcount = antiblank_fmask.sum()
 
         seg_loss = 0.0
         ctc_loss = 0.0
+        vad_loss = 0.0
+        antiblank_loss = 0.0
+
+
         if self.specifications.powerset:
-            # this can be used later, whether we use ctc or nll
             multilabel = self.model.powerset.to_multilabel(prediction)
-            perm_target, _ = permutate(multilabel, target)
-            perm_target_powerset = self.model.powerset.to_powerset(perm_target.float())
+            perm_target_ml, _ = permutate(multilabel, target)
+            perm_target_ps = self.model.powerset.to_powerset(perm_target_ml.float())
 
+            # If we use CTC, modify our encoding so that the last label is the blank token
+            blank_id = self.model.powerset.num_powerset_classes - 1
+            if self.loss_enabled("ctc"):
+                labelled_blank = perm_target_ps[..., blank_id] == 1
+                perm_target_ps[..., blank_id][labelled_blank] = 0
+                perm_target_ps[..., blank_id-1][labelled_blank] = 1
 
-            ctc_files_mask = self.losses_data_filters["ctc"](
-                batch, self.metadata_unique_values
-            )
-            ctc_file_count = ctc_files_mask.sum()
-            if self.loss_enabled('ctc') and ctc_file_count > 0:
-                blank_id = self.model.powerset.num_powerset_classes - 1
-                ctc_loss_fn = torch.nn.CTCLoss(blank=blank_id)
-
-                best_ctc = torch.ones(size=(1,), device=prediction.device) * torch.inf
-                for permutation in itertools.permutations(
-                    range(target.shape[-1]), target.shape[-1]
-                ):
-                    perm_target = target[:, :, permutation]
-                    perm_target_powerset = self.model.powerset.to_powerset(
-                        perm_target.float()
-                    )
-                    perm_target_cids = perm_target_powerset.argmax(dim=-1)
-                    perm_target_cids[perm_target_cids == blank_id] = (
-                        blank_id - 1
-                    )  # dirty hack to avoid blank token in the target
-                    # (batch_size, num_frames) both
-                    collapsed_target, ct_indices = unique_consecutive_padded(
-                        perm_target_cids, return_indices=True
-                    )
-                    # (batch_size)
-                    target_lengths, _ = torch.max(ct_indices, dim=-1)
-                    target_lengths += 1
-
-                    ctc = ctc_loss_fn(
-                        prediction[ctc_files_mask].permute(1, 0, 2),
-                        collapsed_target[ctc_files_mask],
-                        torch.ones(size=(ctc_file_count,), dtype=torch.long)
-                        * num_frames,
-                        target_lengths[ctc_files_mask],
-                    )
-                    best_ctc = torch.min(best_ctc, ctc)
-                ctc_loss = best_ctc
-            if self.loss_enabled('seg') and seg_file_count > 0:
-                seg_loss = self.segmentation_loss(
-                    prediction[seg_files_mask],
-                    perm_target_powerset[seg_files_mask],
-                    weight=weight[seg_files_mask],
+            if self.loss_enabled("ctc") and ctc_fcount > 0:
+                ctc_loss = self._ctc_loss(
+                    prediction[ctc_fmask],
+                    target[ctc_fmask],
+                    blank_id=blank_id,
                 )
 
+            # compute segmentation loss
+            if self.loss_enabled("seg") and seg_fcount > 0:
+                seg_loss = self.segmentation_loss(
+                    prediction[seg_fmask],
+                    perm_target_ps[seg_fmask],
+                    weight=weight[seg_fmask],
+                )
+
+            # Compute VAD loss
+            if self.loss_enabled("vad") and vad_fcount > 0:
+                vad_loss = self._vad_loss_alt(
+                    prediction[vad_fmask],
+                    target[vad_fmask],
+                    weight=weight[vad_fmask],
+                )
+
+            # Compute "anti blank token" loss
+            if self.loss_enabled("antiblank") and antiblank_fcount > 0:
+                antiblank_loss = torch.nn.functional.binary_cross_entropy(
+                    prediction[antiblank_fmask][...,-1].exp(),
+                    torch.zeros_like(prediction[antiblank_fmask][...,-1]),
+                    weight=weight[antiblank_fmask].squeeze(-1),
+                )
+
+        # Multilabel
         else:
-            if self.loss_enabled('seg') and seg_file_count > 0:
+            if self.loss_enabled("seg") and seg_fcount > 0:
                 permutated_prediction, _ = permutate(target, prediction)
                 seg_loss = self.segmentation_loss(
-                    permutated_prediction[seg_files_mask][seg_files_mask], target, weight=weight[seg_files_mask]
+                    permutated_prediction[seg_fmask],
+                    target[seg_fmask],
+                    weight=weight[seg_fmask],
+                )
+
+            if self.loss_enabled("vad") and vad_fcount > 0:
+                vad_loss = self.voice_activity_detection_loss(
+                    permutated_prediction, target, weight=weight
                 )
 
         if seg_loss != 0.0:
@@ -683,39 +785,7 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
                 prog_bar=False,
                 logger=True,
             )
-
-        vad_loss_data_filter = self.losses_data_filters["vad"](
-            batch, self.metadata_unique_values
-        )
-        vad_loss_file_count = vad_loss_data_filter.sum()
-        vad_loss = 0.0
-        if self.loss_enabled('vad') and vad_loss_file_count > 0:
-            # TODO: vad_loss probably does not make sense in powerset mode
-            # because first class (empty set of labels) does exactly this...
-            if self.specifications.powerset:
-                # vad_loss = self.voice_activity_detection_loss(
-                #     prediction, perm_target_powerset, weight=weight
-                # )
-
-                vad_prediction = 1 - prediction[..., 0].exp()  # first class is silence
-
-                # (batch_size, num_frames)
-
-                vad_target, _ = torch.max(target.float(), dim=-1, keepdim=False)
-
-                # (batch_size, num_frames)
-
-                vad_loss = torch.nn.functional.binary_cross_entropy(
-                    vad_prediction[vad_loss_data_filter],
-                    vad_target[vad_loss_data_filter],
-                    # weight=weight[...,0],
-                )
-
-            else:
-                vad_loss = self.voice_activity_detection_loss(
-                    permutated_prediction, target, weight=weight
-                )
-
+        if vad_loss != 0.0:
             self.model.log(
                 "loss/train/vad",
                 vad_loss,
@@ -724,11 +794,20 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
                 prog_bar=False,
                 logger=True,
             )
-
+        if antiblank_loss != 0.0:
+            self.model.log(
+                "loss/train/antiblank",
+                antiblank_loss,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+            )
         loss = (
             self.losses_weights["seg"] * seg_loss
             + self.losses_weights["vad"] * vad_loss
             + self.losses_weights["ctc"] * ctc_loss
+            + self.losses_weights["antiblank"] * antiblank_loss
         )
 
         # skip batch if something went wrong for some reason
@@ -811,17 +890,68 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
 
         if self.specifications.powerset:
             multilabel = self.model.powerset.to_multilabel(prediction)
-            permutated_target, _ = permutate(multilabel, target)
+            perm_target_ml, _ = permutate(multilabel, target)
+            perm_target_ps = self.model.powerset.to_powerset(perm_target_ml.float())
 
-            # FIXME: handle case where target have too many speakers?
-            # since we don't need
-            permutated_target_powerset = self.model.powerset.to_powerset(
-                permutated_target.float()
+            # If we use CTC, modify our encoding so that the last label is the blank token
+            blank_id = self.model.powerset.num_powerset_classes - 1
+            if self.loss_enabled("ctc"):
+                labelled_blank = perm_target_ps[..., blank_id] == 1
+                perm_target_ps[...,blank_id][labelled_blank] = 0
+                perm_target_ps[...,blank_id-1][labelled_blank] = 1
+
+            # Compute CTC loss
+            ctc_loss = self._ctc_loss(
+                prediction,
+                target,
+                blank_id=blank_id,
             )
+            self.model.log(
+                "loss/val/ctc",
+                ctc_loss,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+            )
+
+            # compute segmentation loss
             seg_loss = self.segmentation_loss(
-                prediction, permutated_target_powerset, weight=weight
+                prediction,
+                perm_target_ps,
+                weight=weight,
             )
 
+            # Compute VAD loss
+            vad_loss = self._vad_loss_alt(
+                prediction,
+                target,
+                weight=weight,
+            )
+            self.model.log(
+                "loss/val/vad",
+                vad_loss,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+            )
+
+            # Compute "anti blank token" loss
+            if self.loss_enabled("antiblank"):
+                antiblank_loss = torch.nn.functional.binary_cross_entropy(
+                    prediction[...,-1:].exp(),
+                    torch.zeros_like(prediction[..., -1:]),
+                    weight=weight,
+                )
+                self.model.log(
+                    "loss/val/antiblank",
+                    antiblank_loss,
+                    on_step=False,
+                    on_epoch=True,
+                    prog_bar=False,
+                    logger=True,
+                )
         else:
             permutated_prediction, _ = permutate(target, prediction)
             seg_loss = self.segmentation_loss(
@@ -887,7 +1017,7 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
 
             self.model.metric_edit_distance(
                 prediction.argmax(dim=-1),
-                permutated_target_powerset.argmax(dim=-1),
+                perm_target_ps.argmax(dim=-1),
             )
 
             self.model.log(
@@ -935,8 +1065,9 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
         # visualize first 9 validation samples of first batch in Tensorboard/MLflow
 
         if self.specifications.powerset:
-            y = permutated_target.float().cpu().numpy()
-            y_pred = multilabel.cpu().numpy()
+            y = perm_target_ml.float().cpu().numpy()
+            # y_pred = multilabel.cpu().numpy()
+            y_pred = prediction.exp().cpu().numpy()
         else:
             y = target.float().cpu().numpy()
             y_pred = permutated_prediction.cpu().numpy()
@@ -984,7 +1115,7 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
 
             if self.specifications.powerset:
                 collapsed_y = unique_consecutive_padded(
-                    permutated_target_powerset[sample_idx].argmax(dim=-1)
+                    perm_target_ps[sample_idx].argmax(dim=-1)
                 )
                 collapsed_y = collapsed_y[collapsed_y != -1]
 
@@ -1019,7 +1150,9 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
     @property
     def val_monitor(self):
         return (
-            ("CTC/edit_distance", "min") if self.loss_enabled('ctc') else super().val_monitor
+            ("CTC/edit_distance", "min")
+            if self.loss_enabled("ctc")
+            else super().val_monitor
         )
 
 
