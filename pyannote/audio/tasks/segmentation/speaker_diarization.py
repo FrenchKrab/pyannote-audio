@@ -211,6 +211,10 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
                     )
                 if isinstance(v, Callable):
                     self.losses_data_filters[k] = v
+                else:
+                    raise ValueError(
+                        f"Loss data filter for loss {k} must be a callable."
+                    )
 
         # parameter validation
         if max_speakers_per_frame is not None:
@@ -752,6 +756,7 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
                     weight=weight[antiblank_fmask].squeeze(-1),
                 )
 
+
         # Multilabel
         else:
             if self.loss_enabled("seg") and seg_fcount > 0:
@@ -899,6 +904,15 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
                 labelled_blank = perm_target_ps[..., blank_id] == 1
                 perm_target_ps[...,blank_id][labelled_blank] = 0
                 perm_target_ps[...,blank_id-1][labelled_blank] = 1
+
+                self.model.log(
+                    "CTC/blankprob",
+                    prediction[..., blank_id].exp().mean(),
+                    on_step=False,
+                    on_epoch=True,
+                    prog_bar=False,
+                    logger=True,
+                )
 
             # Compute CTC loss
             ctc_loss = self._ctc_loss(
