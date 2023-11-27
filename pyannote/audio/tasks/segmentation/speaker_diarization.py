@@ -894,6 +894,10 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
         warm_up_right = round(self.warm_up[1] / self.duration * num_frames)
         weight[:, num_frames - warm_up_right :] = 0.0
 
+        seg_loss = 0.0
+        vad_loss = 0.0
+        ctc_loss = 0.0
+        antiblank_loss = 0.0
         if self.specifications.powerset:
             multilabel = self.model.powerset.to_multilabel(prediction)
             perm_target_ml, _ = permutate(multilabel, target)
@@ -921,14 +925,6 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
                 target,
                 blank_id=blank_id,
             )
-            self.model.log(
-                "loss/val/ctc",
-                ctc_loss,
-                on_step=False,
-                on_epoch=True,
-                prog_bar=False,
-                logger=True,
-            )
 
             # compute segmentation loss
             seg_loss = self.segmentation_loss(
@@ -943,14 +939,7 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
                 target,
                 weight=weight,
             )
-            self.model.log(
-                "loss/val/vad",
-                vad_loss,
-                on_step=False,
-                on_epoch=True,
-                prog_bar=False,
-                logger=True,
-            )
+
 
             # Compute "anti blank token" loss
             if self.loss_enabled("antiblank"):
@@ -959,47 +948,17 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
                     torch.zeros_like(prediction[..., -1:]),
                     weight=weight,
                 )
-                self.model.log(
-                    "loss/val/antiblank",
-                    antiblank_loss,
-                    on_step=False,
-                    on_epoch=True,
-                    prog_bar=False,
-                    logger=True,
-                )
         else:
             permutated_prediction, _ = permutate(target, prediction)
             seg_loss = self.segmentation_loss(
                 permutated_prediction, target, weight=weight
             )
 
-        self.model.log(
-            "loss/val/segmentation",
-            seg_loss,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=False,
-            logger=True,
-        )
+            vad_loss = self.voice_activity_detection_loss(
+                permutated_prediction, target, weight=weight
+            )
 
-        if self.vad_loss is None:
-            vad_loss = 0.0
-
-        else:
-            # TODO: vad_loss probably does not make sense in powerset mode
-            # because first class (empty set of labels) does exactly this...
-            if self.specifications.powerset:
-                # vad_loss = self.voice_activity_detection_loss(
-                #     prediction, permutated_target_powerset, weight=weight
-                # )
-                vad_loss = 0.0
-                pass  # TODO: fix
-
-            else:
-                vad_loss = self.voice_activity_detection_loss(
-                    permutated_prediction, target, weight=weight
-                )
-
+        if vad_loss != 0.0:
             self.model.log(
                 "loss/val/vad",
                 vad_loss,
@@ -1009,7 +968,40 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
                 logger=True,
             )
 
-        loss = seg_loss + vad_loss
+        if seg_loss != 0.0:
+            self.model.log(
+                "loss/val/segmentation",
+                seg_loss,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+            )
+        if antiblank_loss != 0.0:
+            self.model.log(
+                "loss/val/antiblank",
+                antiblank_loss,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+            )
+        if ctc_loss != 0.0:
+            self.model.log(
+                "loss/val/ctc",
+                ctc_loss,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+            )
+
+        loss = (
+            self.losses_weights["seg"] * seg_loss
+            + self.losses_weights["vad"] * vad_loss
+            + self.losses_weights["ctc"] * ctc_loss
+            + self.losses_weights["antiblank"] * antiblank_loss
+        )
 
         self.model.log(
             "loss/val",
@@ -1020,6 +1012,7 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
             logger=True,
         )
 
+        # Compute validation metric (& edit distance if relevant)
         if self.specifications.powerset:
             self.model.validation_metric(
                 torch.transpose(
@@ -1030,11 +1023,11 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
                 ),
             )
 
+            # Compute edit distance
             self.model.metric_edit_distance(
                 prediction.argmax(dim=-1),
                 perm_target_ps.argmax(dim=-1),
             )
-
             self.model.log(
                 "CTC/edit_distance",
                 self.model.metric_edit_distance,
@@ -1052,14 +1045,6 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
                     target[:, warm_up_left : num_frames - warm_up_right], 1, 2
                 ),
             )
-            # self.model.metric_edit_distance(
-            #     self.model.powerset.to_powerset(
-            #         permutated_prediction[:, warm_up_left : num_frames - warm_up_right]
-            #     ).argmax(dim=-1),
-            #     self.model.powerset.to_powerset(
-            #         target[:, warm_up_left : num_frames - warm_up_right]
-            #     ).argmax(dim=-1),
-            # )
 
         self.model.log_dict(
             self.model.validation_metric,
@@ -1165,9 +1150,7 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
     @property
     def val_monitor(self):
         return (
-            ("CTC/edit_distance", "min")
-            if self.loss_enabled("ctc")
-            else super().val_monitor
+            ("loss/val", "min")
         )
 
 
