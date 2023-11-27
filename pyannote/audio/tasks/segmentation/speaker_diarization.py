@@ -197,7 +197,6 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
                     f"Unknown loss name. Valid loss names are {list(self.losses_weights.keys())}."
                 )
             self.losses_weights.update(losses_weights)
-        
 
         # initialize the dictionary of data filters
         self.losses_data_filters: dict[str, Callable[[dict, dict], torch.Tensor]] = {
@@ -594,7 +593,8 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
             [
                 (vad_target[..., None] - 1).abs(),
                 vad_target[..., None],
-            ], dim=-1
+            ],
+            dim=-1,
         )
         # (batch_size, num_frames, 2) where last dim = (non-speech, speech)
 
@@ -641,7 +641,7 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
             )
             best_ctc = torch.min(best_ctc, ctc)
         # normalize ctc loss by prediction sequence length
-        return best_ctc/prediction.shape[1]
+        return best_ctc / prediction.shape[1]
 
     def training_step(self, batch, batch_idx: int):
         """Compute permutation-invariant segmentation loss
@@ -713,7 +713,6 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
         vad_loss = 0.0
         antiblank_loss = 0.0
 
-
         if self.specifications.powerset:
             multilabel = self.model.powerset.to_multilabel(prediction)
             perm_target_ml, _ = permutate(multilabel, target)
@@ -724,7 +723,7 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
             if self.loss_enabled("ctc"):
                 labelled_blank = perm_target_ps[..., blank_id] == 1
                 perm_target_ps[..., blank_id][labelled_blank] = 0
-                perm_target_ps[..., blank_id-1][labelled_blank] = 1
+                perm_target_ps[..., blank_id - 1][labelled_blank] = 1
 
             if self.loss_enabled("ctc") and ctc_fcount > 0:
                 ctc_loss = self._ctc_loss(
@@ -752,11 +751,10 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
             # Compute "anti blank token" loss
             if self.loss_enabled("antiblank") and antiblank_fcount > 0:
                 antiblank_loss = torch.nn.functional.binary_cross_entropy(
-                    prediction[antiblank_fmask][...,-1].exp(),
-                    torch.zeros_like(prediction[antiblank_fmask][...,-1]),
+                    prediction[antiblank_fmask][..., -1].exp(),
+                    torch.zeros_like(prediction[antiblank_fmask][..., -1]),
                     weight=weight[antiblank_fmask].squeeze(-1),
                 )
-
 
         # Multilabel
         else:
@@ -907,8 +905,8 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
             blank_id = self.model.powerset.num_powerset_classes - 1
             if self.loss_enabled("ctc"):
                 labelled_blank = perm_target_ps[..., blank_id] == 1
-                perm_target_ps[...,blank_id][labelled_blank] = 0
-                perm_target_ps[...,blank_id-1][labelled_blank] = 1
+                perm_target_ps[..., blank_id][labelled_blank] = 0
+                perm_target_ps[..., blank_id - 1][labelled_blank] = 1
 
                 self.model.log(
                     "CTC/blankprob",
@@ -940,11 +938,10 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
                 weight=weight,
             )
 
-
             # Compute "anti blank token" loss
             if self.loss_enabled("antiblank"):
                 antiblank_loss = torch.nn.functional.binary_cross_entropy(
-                    prediction[...,-1:].exp(),
+                    prediction[..., -1:].exp(),
                     torch.zeros_like(prediction[..., -1:]),
                     weight=weight,
                 )
@@ -1023,7 +1020,7 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
                 ),
             )
 
-            # Compute edit distance
+            # Compute edit distance
             self.model.metric_edit_distance(
                 prediction.argmax(dim=-1),
                 perm_target_ps.argmax(dim=-1),
@@ -1149,9 +1146,7 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
 
     @property
     def val_monitor(self):
-        return (
-            ("loss/val", "min")
-        )
+        return ("loss/val", "min")
 
 
 def main(protocol: str, subset: str = "test", model: str = "pyannote/segmentation"):
