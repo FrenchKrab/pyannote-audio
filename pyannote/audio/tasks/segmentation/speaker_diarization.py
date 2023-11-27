@@ -640,7 +640,8 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
                 target_lengths,
             )
             best_ctc = torch.min(best_ctc, ctc)
-        return best_ctc
+        # normalize ctc loss by prediction sequence length
+        return best_ctc/prediction.shape[1]
 
     def training_step(self, batch, batch_idx: int):
         """Compute permutation-invariant segmentation loss
