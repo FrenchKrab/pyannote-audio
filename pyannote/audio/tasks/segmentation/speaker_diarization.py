@@ -430,6 +430,7 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
         metadata = self.metadata[file_id]
         sample["meta"] = {key: metadata[key] for key in metadata.dtype.names}
         sample["meta"]["file"] = file_id
+        sample["meta"]["chunk_start"] = chunk.start
 
         return sample
 
@@ -694,17 +695,18 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
         warm_up_right = round(self.warm_up[1] / self.duration * num_frames)
         weight[:, num_frames - warm_up_right :] = 0.0
 
-        seg_fmask = self.losses_data_filters["seg"](batch, self.metadata_unique_values)
+        meta_values = self.metadata_unique_values
+        seg_fmask = self.losses_data_filters["seg"](batch, meta_values, self)
         seg_fcount = seg_fmask.sum()
 
-        vad_fmask = self.losses_data_filters["vad"](batch, self.metadata_unique_values)
+        vad_fmask = self.losses_data_filters["vad"](batch, meta_values, self)
         vad_fcount = vad_fmask.sum()
 
-        ctc_fmask = self.losses_data_filters["ctc"](batch, self.metadata_unique_values)
+        ctc_fmask = self.losses_data_filters["ctc"](batch, meta_values, self)
         ctc_fcount = ctc_fmask.sum()
 
         antiblank_fmask = self.losses_data_filters["antiblank"](
-            batch, self.metadata_unique_values
+            batch, meta_values, self
         )
         antiblank_fcount = antiblank_fmask.sum()
 
