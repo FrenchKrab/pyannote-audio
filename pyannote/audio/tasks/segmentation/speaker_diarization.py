@@ -236,7 +236,7 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
         self.vad_loss = vad_loss
 
     def _identity_data_filter(
-        batch: dict, metadata_unique_values: dict
+        batch: dict, *args
     ) -> torch.Tensor:
         return torch.ones(
             batch["y"].shape[0], dtype=torch.bool, device=batch["y"].device
