@@ -20,12 +20,13 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+import chunk
 import itertools
 import math
 import random
 import warnings
 from collections import defaultdict
-from typing import Dict, Sequence, Union
+from typing import Dict, Sequence, Text, Tuple, Union
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -421,7 +422,9 @@ class SegmentationTaskMixin:
         # indices of training files that matches domain filters
         training = self.metadata["subset"] == Subsets.index("train")
         for key, value in filters.items():
-            training &= self.metadata[key] == self.metadata_unique_values[key].index(value)
+            training &= self.metadata[key] == self.metadata_unique_values[key].index(
+                value
+            )
         file_ids = np.where(training)[0]
 
         # turn annotated duration into a probability distribution
@@ -493,11 +496,48 @@ class SegmentationTaskMixin:
                 filters = {key: value for key, value in zip(balance, product)}
                 subchunks[product] = self.train__iter__helper(rng, **filters)
 
+        # Compute the balance weights
+        balance_weights: Dict[Tuple[Text], float] = getattr(
+            self, "balance_weights", None
+        )
+        balance_weights_cumsum = None
+        if balance_weights is not None:
+            balance_weights_keys = sorted(
+                list(balance_weights.keys()), key=len, reverse=True
+            )
+
+            choice_weights = []
+            for chunk_tuple in list(subchunks):
+                if chunk_tuple in balance_weights_keys:
+                    choice_weights.append(balance_weights[chunk_tuple])
+                else:
+                    matching_weight = None
+                    for key in balance_weights_keys:
+                        if matching_weight is not None:
+                            raise ValueError(
+                                "Multiple matching weights found for the same element"
+                                ", please give a non ambiguous balance_weights"
+                            )
+                        if all([item in chunk_tuple for item in key]):
+                            matching_weight = balance_weights[key]
+                    if matching_weight is None:
+                        matching_weight = 1.0
+                    choice_weights.append(matching_weight)
+            print("Using custom weights for balancing:", choice_weights)
+            balance_weights_cumsum = list(itertools.accumulate(choice_weights))
+
         while True:
             # select one subchunk generator at random (with uniform probability)
             # so that it is balanced on average
             if balance is not None:
-                chunks = subchunks[rng.choice(list(subchunks))]
+                if balance_weights_cumsum is not None:
+                    chunks = subchunks[
+                        rng.choices(
+                            list(subchunks), cum_weights=balance_weights_cumsum
+                        )[0]
+                    ]
+                else:
+                    chunks = subchunks[rng.choice(list(subchunks))]
 
             # generate random chunk
             yield next(chunks)

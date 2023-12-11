@@ -24,7 +24,7 @@ import itertools
 import math
 import warnings
 from collections import Counter
-from typing import Callable, Dict, Literal, Sequence, Text, Tuple, Union
+from typing import Callable, Dict, Iterable, Literal, Sequence, Text, Tuple, Union
 
 import numpy as np
 import torch
@@ -152,6 +152,7 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
         weigh_by_cardinality: bool = False,
         warm_up: Union[float, Tuple[float, float]] = 0.0,
         balance: Sequence[Text] = None,
+        balance_weights: Dict[Tuple[Text], float] = None,
         weight: Text = None,
         batch_size: int = 32,
         num_workers: int = None,
@@ -228,16 +229,28 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
         if self.loss_enabled("ctc") and max_speakers_per_frame is None:
             raise ValueError("TEMP: CTC must be used with powerset encoding for now.")
 
+        if balance_weights is not None:
+            balance_weights_fixed = {}
+            for k, v in balance_weights.items():
+                if (
+                    not isinstance(k, str)
+                    and not isinstance(k, tuple)
+                    and isinstance(k, Iterable)
+                ):
+                    balance_weights_fixed[tuple(k)] = v
+                else:
+                    balance_weights_fixed[k] = v
+            balance_weights = balance_weights_fixed
+
         self.max_speakers_per_chunk = max_speakers_per_chunk
         self.max_speakers_per_frame = max_speakers_per_frame
         self.weigh_by_cardinality = weigh_by_cardinality
         self.balance = balance
+        self.balance_weights = balance_weights
         self.weight = weight
         self.vad_loss = vad_loss
 
-    def _identity_data_filter(
-        batch: dict, *args
-    ) -> torch.Tensor:
+    def _identity_data_filter(batch: dict, *args) -> torch.Tensor:
         return torch.ones(
             batch["y"].shape[0], dtype=torch.bool, device=batch["y"].device
         )
@@ -671,6 +684,8 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
         keep: torch.Tensor = num_speakers <= self.max_speakers_per_chunk
         target = target[keep]
         waveform = waveform[keep]
+
+        print(f"test1: {batch['meta']['test1']}")
 
         # corner case
         if not keep.any():
