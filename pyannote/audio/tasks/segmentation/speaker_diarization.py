@@ -234,13 +234,16 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
             for k, v in balance_weights.items():
                 if (
                     not isinstance(k, str)
-                    and not isinstance(k, tuple)
                     and isinstance(k, Iterable)
+                    and not isinstance(k, tuple)
                 ):
                     balance_weights_fixed[tuple(k)] = v
+                elif isinstance(k, str):
+                    balance_weights_fixed[(k,)] = v
                 else:
                     balance_weights_fixed[k] = v
             balance_weights = balance_weights_fixed
+            # print(f'{balance_weights=}')
 
         self.max_speakers_per_chunk = max_speakers_per_chunk
         self.max_speakers_per_frame = max_speakers_per_frame
@@ -685,7 +688,7 @@ class SpeakerDiarization(SegmentationTaskMixin, Task):
         target = target[keep]
         waveform = waveform[keep]
 
-        print(f"test1: {batch['meta']['test1']}")
+        # print(f"test1: {batch['meta']['customtag']}")
 
         # corner case
         if not keep.any():
