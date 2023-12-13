@@ -523,7 +523,7 @@ class SegmentationTaskMixin:
                     if matching_weight is None:
                         matching_weight = 1.0
                     choice_weights.append(matching_weight)
-            print("Using custom weights for balancing:", choice_weights)
+            # print("Using custom weights for balancing:", choice_weights)
             balance_weights_cumsum = list(itertools.accumulate(choice_weights))
 
         while True:
