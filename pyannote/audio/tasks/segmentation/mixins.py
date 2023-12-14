@@ -25,7 +25,7 @@ import math
 import random
 import warnings
 from collections import defaultdict
-from typing import Dict, Sequence, Text, Tuple, Union
+from typing import Dict, Iterable, Sequence, Text, Tuple, Union
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -47,6 +47,24 @@ Scopes = list(Scope.__args__)
 
 class SegmentationTaskMixin:
     """Methods common to most segmentation tasks"""
+
+    def _get_fixed_balance_weights(self, balance, balance_weights):
+        if balance is None:
+            raise ValueError(
+                "`balance_weights` cannot be used without `balance`."
+            )
+
+        balance_weights_fixed = {}
+        for k, v in balance_weights.items():
+            if (
+                not isinstance(k, str)
+                and not isinstance(k, tuple)
+                and isinstance(k, Iterable)
+            ):
+                balance_weights_fixed[tuple(k)] = v
+            else:
+                balance_weights_fixed[k] = v
+        return balance_weights_fixed
 
     def get_file(self, file_id):
         file = dict()
