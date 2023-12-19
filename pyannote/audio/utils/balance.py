@@ -1,5 +1,5 @@
 import itertools
-from typing import Dict, Iterable, List, Text, Tuple, Union
+from typing import Any, Dict, Iterable, List, Text, Tuple, Union
 
 
 def _get_tuples_matching_power(tuple1: Tuple, tuple2: Tuple) -> int:
@@ -20,6 +20,31 @@ def _get_tuples_matching_power(tuple1: Tuple, tuple2: Tuple) -> int:
             return 0
     return matching_elements
 
+def _to_weighting_rule_tuple(val: Union[Text, Iterable[Text], Tuple[Text]]) -> Tuple[Text]:
+    if (
+        not isinstance(val, str)
+        and not isinstance(val, tuple)
+        and isinstance(val, Iterable)
+    ):
+        return tuple(val)
+    if isinstance(val, str):
+        return (val,)
+    return val
+
+def _to_weighting_rule_data(val: Union[float, Tuple[float, int]]) -> Tuple[float, int]:
+    if isinstance(val, float):
+        return (val, 0)
+    return val
+
+def _check_weighting_rule_tuple(val: Any, balance: List[Text]) -> None:
+    if not isinstance(val, Tuple) or len(val) > len(balance):
+        raise ValueError(f"{val} is not a matching tuple rule.")
+
+def _check_weighting_rule_data(val: Any) -> None:
+    if not isinstance(val, Tuple) or len(val) != 2:
+        raise ValueError(f"{val} is not a tuple (weight, priority)")
+    if not isinstance(val[0], float) or not isinstance(val[1], int):
+        raise ValueError(f"{val} has incorrect types, expected: (float, int)")
 
 def _get_fixed_balance_weights(balance, balance_weights):
     if balance is None:
@@ -30,17 +55,12 @@ def _get_fixed_balance_weights(balance, balance_weights):
         return balance_weights_fixed
 
     for k, v in balance_weights.items():
-        k_new = k
-        v_new = v
-        if (
-            not isinstance(k, str)
-            and not isinstance(k, tuple)
-            and isinstance(k, Iterable)
-        ):
-            k_new = tuple(k)
-        if not isinstance(v, Tuple):
-            v_new = (v, 1)
+        k_new = _to_weighting_rule_tuple(k)
+        v_new = _to_weighting_rule_data(v)
 
+        _check_weighting_rule_tuple(k_new, balance)
+        _check_weighting_rule_data(v_new)
+        
         balance_weights_fixed[k_new] = v_new
     return balance_weights_fixed
 
@@ -115,8 +135,12 @@ class TaskBalancingSpecifications:
     ) -> None:
         self._weight_rules = _get_fixed_balance_weights(self.keys, weighting_rules)
 
-    def add_weighting_rule(self, tuple: Tuple[Text], weighting: float, priority=1):
-        self._weight_rules[tuple] = (weighting, priority)
+    def add_weighting_rule(self, tuple: Union[Text,Tuple[Text]], weighting: float, priority=0):
+        tuple = _to_weighting_rule_tuple(tuple)
+        data = (weighting, priority)
+        _check_weighting_rule_tuple(tuple, self.keys)
+        _check_weighting_rule_data(data)
+        self._weight_rules[tuple] = data
 
     def remove_weighting_rule(self, tuple: Tuple[Text]):
         del self._weight_rules[tuple]
