@@ -20,38 +20,46 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-from functools import cached_property
+
+import itertools
 from typing import Dict, List, Literal, Optional, Sequence, Text, Tuple, Union
-from einops import rearrange
 
 import numpy as np
-import torch
-import torch.nn.functional as F
 from pyannote.core import Segment, SlidingWindowFeature
 from pyannote.database import Protocol
-from pyannote.database.protocol import SegmentationProtocol
+import torch
+import torch.nn.functional as F
 from torch_audiomentations.core.transforms_interface import BaseWaveformTransform
-from torchmetrics import Accuracy, F1Score, Metric, MetricCollection, Precision, Recall
+from torchmetrics import ClasswiseWrapper, Metric
+from torchmetrics.classification import (
+    BinaryAccuracy,
+    BinaryF1Score,
+    BinaryPrecision,
+    BinaryRecall,
+)
 
 from pyannote.audio.core.task import Problem, Resolution, Specifications, Task
 from pyannote.audio.tasks.segmentation.mixins import SegmentationTaskMixin
 
 
-class MultiLabelSegmentation(SegmentationTaskMixin, Task):
-    """Generic multi-label segmentation
+class MulticlassSegmentation(SegmentationTaskMixin, Task):
+    """Overlapped speech detection
 
-    Multi-label segmentation is the process of detecting temporal intervals
-    when a specific audio class is active.
+    Overlapped speech detection is the task of detecting regions where at least
+    two speakers are speaking at the same time.
 
-    Example use cases include speaker tracking, gender (male/female)
-    classification, or audio event detection.
+    Here, it is addressed with the same approach as voice activity detection,
+    except "speech" class is replaced by "overlap", where a frame is marked as
+    "overlap" if two speakers or more are active.
+
+    Note that data augmentation is used to increase the proporition of "overlap".
+    This is achieved by generating chunks made out of the (weighted) sum of two
+    random chunks.
 
     Parameters
     ----------
     protocol : Protocol
         pyannote.database protocol
-    classes : List[str], optional
-        List of classes. Defaults to the list of classes available in the training set.
     duration : float, optional
         Chunks duration. Defaults to 2s.
     warm_up : float or (float, float), optional
@@ -79,13 +87,8 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
         torch_audiomentations waveform transform, used by dataloader
         during training.
     metric : optional
-        Multilabel validation metric(s). Can be anything supported by torchmetrics.MetricCollection.
-        Make sure the metric's ignore_index==-1 if your data contains un-annotated frames.
-        Defaults to F1, Precision, Recall & Accuracy in macro mode.
-    metric_classwise: Union[Metric, Sequence[Metric], Dict[str, Metric]], optional
-        Validation metric(s) to compute for each class (binary). Can be anything supported by torchmetrics.MetricCollection.
-        No need for ignore_index=-1 here, as the metric is computed only on the labelled frames.
-        Defaults to F1, Precision, Recall & Accuracy.
+        Validation metric(s). Can be anything supported by torchmetrics.MetricCollection.
+        Defaults to AUROC (area under the ROC curve).
     """
 
     def __init__(
@@ -101,14 +104,9 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
         pin_memory: bool = False,
         augmentation: BaseWaveformTransform = None,
         metric: Union[Metric, Sequence[Metric], Dict[str, Metric]] = None,
-        metric_classwise: Union[Metric, Sequence[Metric], Dict[str, Metric]] = None,
-        label_scope: Literal["file", "database", "global"] = "global",
+        use_powerset: bool = True,
+        label_scope: Literal["global", "database", "file"] = "file",
     ):
-        if not isinstance(protocol, SegmentationProtocol):
-            raise ValueError(
-                f"MultiLabelSegmentation task expects a SegmentationProtocol but you gave {type(protocol)}. "
-            )
-
         super().__init__(
             protocol,
             duration=duration,
@@ -123,19 +121,26 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
         self.balance = balance
         self.weight = weight
         self.classes = classes
-        self._metric_classwise = metric_classwise
+        self.use_powerset = use_powerset
         self.label_scope = label_scope
 
-        # task specification depends on the data: we do not know in advance which
-        # classes should be detected. therefore, we postpone the definition of
-        # specifications to setup()
+        # NEEDS classes to be passed
+        print(f"classes: {self.classes}")
+        if self.use_powerset:
+            powersetclasses = ["nothing"]
+            for simult_class_count in range(1, len(self.classes) + 1):
+                for combination in itertools.combinations(self.classes, simult_class_count):
+                    powersetclasses.append("+".join(combination))
+            self.classes = powersetclasses
+            
+            print(f"classes after powerset: {self.classes}")
 
     def setup(self):
         super().setup()
 
         self.specifications = Specifications(
             classes=self.classes,
-            problem=Problem.MULTI_LABEL_CLASSIFICATION,
+            problem=Problem.MONO_LABEL_CLASSIFICATION,
             resolution=Resolution.FRAME,
             duration=self.duration,
             min_duration=self.min_duration,
@@ -143,7 +148,7 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
         )
 
     def prepare_chunk(self, file_id: int, start_time: float, duration: float):
-        """Prepare chunk for multi-label segmentation
+        """Prepare chunk for multi-class segmentation
 
         Parameters
         ----------
@@ -166,10 +171,9 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
 
         Notes
         -----
-        y is a trinary matrix with shape (num_frames, num_classes):
-            -  0: class is inactive
-            -  1: class is active
-            - -1: we have no idea
+        y is shaped (num_frames, 1):
+            -  0/1/2/...: class #1, #2, etc
+            - -1: unknown class
 
         """
 
@@ -194,18 +198,19 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
         end_idx = np.ceil(end / self.model.example_output.frames.step).astype(int)
 
         # frame-level targets (-1 for un-annotated classes)
-        y = -np.ones(
-            (self.model.example_output.num_frames, len(self.classes)), dtype=np.int8
-        )
-        y[:, self.annotated_classes[file_id]] = 0
+        # TODO: add support for -1s
+        y = -np.zeros((self.model.example_output.num_frames, 1), dtype=np.int8)
+        # y[:, self.annotated_classes[file_id]] = 0
         for start, end, label in zip(
             start_idx, end_idx, chunk_annotations[f"{self.label_scope}_label_idx"]
         ):
-            y[start:end, label] = 1
+            y[start:end, 0] = label + 1
+            # y[start:end, 0] = 1 # because chunk_annotations["global_label_idx"] is always -1 for some reason
+            # TODO: add support for powerset
 
-        sample["y"] = SlidingWindowFeature(
-            y, self.model.example_output.frames, labels=self.classes
-        )
+        sample["y"] = SlidingWindowFeature(y, self.model.example_output.frames)
+
+        # print(f"----\n{y.shape=}\n{self.model.example_output=}\n{self.model.example_output.num_frames=}\n{self.model.example_output.frames=}\n{chunk_annotations['global_label_idx']=}\n{chunk_annotations=}\n{start_idx=}\n{end_idx}")
 
         metadata = self.metadata[file_id]
         sample["meta"] = {key: metadata[key] for key in metadata.dtype.names}
@@ -216,8 +221,7 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
     def training_step(self, batch, batch_idx: int):
         X = batch["X"]
         y_pred = self.model(X)
-        y_true = batch["y"]
-        assert y_pred.shape == y_true.shape
+        y_true = batch["y"].squeeze()
 
         # TODO: add support for frame weights
         # TODO: add support for class weights
@@ -226,7 +230,7 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
         mask: torch.Tensor = y_true != -1
         y_pred = y_pred[mask]
         y_true = y_true[mask]
-        loss = F.binary_cross_entropy(y_pred, y_true.type(torch.float))
+        loss = F.nll_loss(y_pred, y_true.type(torch.long))
 
         # skip batch if something went wrong for some reason
         if torch.isnan(loss):
@@ -245,24 +249,21 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
     def validation_step(self, batch, batch_idx: int):
         X = batch["X"]
         y_pred = self.model(X)
-        y_true = batch["y"]
-        assert y_pred.shape == y_true.shape
+        y_true = batch["y"].squeeze().type(torch.long)
 
         # TODO: add support for frame weights
         # TODO: add support for class weights
 
         # mask (frame, class) index for which label is missing
         mask: torch.Tensor = y_true != -1
-        y_pred_labelled = y_pred[mask]
-        y_true_labelled = y_true[mask]
-        loss = F.binary_cross_entropy(
-            y_pred_labelled, y_true_labelled.type(torch.float)
-        )
+        y_pred = y_pred[mask]
+        y_true = y_true[mask]
+        loss = F.nll_loss(y_pred, y_true)
 
         # log global metric (multilabel)
         self.model.validation_metric(
-            y_pred.reshape((-1, y_pred.shape[-1])),
-            y_true.reshape((-1, y_true.shape[-1])),
+            y_pred.argmax(dim=-1),
+            y_true,
         )
         self.model.log_dict(
             self.model.validation_metric,
@@ -271,29 +272,6 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
             prog_bar=True,
             logger=True,
         )
-
-        # log metrics per class (binary)
-        for class_id, class_name in enumerate(self.classes):
-            mask: torch.Tensor = y_true[..., class_id] != -1
-            if mask.sum() == 0:
-                continue
-
-            y_pred_labelled = y_pred[..., class_id][mask]
-            y_true_labelled = y_true[..., class_id][mask]
-
-            metric = self.model.validation_metric_classwise[class_name]
-            metric(
-                y_pred_labelled,
-                y_true_labelled,
-            )
-
-            self.model.log_dict(
-                metric,
-                on_step=False,
-                on_epoch=True,
-                prog_bar=True,
-                logger=True,
-            )
 
         # log losses
         self.model.log(
@@ -304,94 +282,37 @@ class MultiLabelSegmentation(SegmentationTaskMixin, Task):
             prog_bar=True,
             logger=True,
         )
+
         return {"loss": loss}
 
-    def default_metric(
-        self,
-    ) -> Union[Metric, Sequence[Metric], Dict[str, Metric]]:
-        class_count = len(self.classes)
-        if class_count > 1:  # multilabel
-            return {
-                "F1": F1Score(
-                    task="multilabel",
-                    num_labels=class_count,
-                    ignore_index=-1,
-                    average="macro",
-                ),
-                "Precision": Precision(
-                    task="multilabel",
-                    num_labels=class_count,
-                    ignore_index=-1,
-                    average="macro",
-                ),
-                "Recall": Recall(
-                    task="multilabel",
-                    num_labels=class_count,
-                    ignore_index=-1,
-                    average="macro",
-                ),
-                "Accuracy": Accuracy(
-                    task="multilabel",
-                    num_labels=class_count,
-                    ignore_index=-1,
-                    average="macro",
-                ),
-            }
-        else:
-            # Binary classification, this case is handled by the per-class metric, see 'default_metric_per_class'/'metric_classwise'
-            return []
-
-    def default_metric_classwise(
-        self,
-    ) -> Union[Metric, Sequence[Metric], Dict[str, Metric]]:
+    def default_metric(self) -> Union[Metric, Sequence[Metric], Dict[str, Metric]]:
         return {
-            "F1": F1Score(task="binary"),
-            "Precision": Precision(task="binary"),
-            "Recall": Recall(task="binary"),
-            "Accuracy": Accuracy(task="binary"),
+            f"{self.classes[1]}/F1": BinaryF1Score(),
+            f"{self.classes[1]}/Accuracy": BinaryAccuracy(),
+            f"{self.classes[1]}/Precision": BinaryPrecision(),
+            f"{self.classes[1]}/Recall": BinaryRecall(),
+            # "ClasswiseF1": ClasswiseWrapper(
+            #     MulticlassF1Score(num_classes=len(self.classes), average=None),
+            #     labels=self.classes,
+            #     postfix="/F1",
+            # ),
+            # "ClasswiseAccuracy": ClasswiseWrapper(
+            #     MulticlassAccuracy(num_classes=len(self.classes), average=None),
+            #     labels=self.classes,
+            #     postfix="/Accuracy",
+            # ),
+            # "ClasswisePrecision": ClasswiseWrapper(
+            #     MulticlassPrecision(num_classes=len(self.classes), average=None),
+            #     labels=self.classes,
+            #     postfix="/Precision",
+            # ),
+            # "ClasswiseRecall": ClasswiseWrapper(
+            #     MulticlassRecall(num_classes=len(self.classes), average=None),
+            #     labels=self.classes,
+            #     postfix="/Recall",
+            # ),
         }
-
-    @cached_property
-    def metric_classwise(self) -> MetricCollection:
-        if self._metric_classwise is None:
-            self._metric_classwise = self.default_metric_classwise()
-
-        return MetricCollection(self._metric_classwise)
-
-    def setup_validation_metric(self):
-        # setup global/multilabel validation metric
-        super().setup_validation_metric()
-
-        # and then setup validation metric per class / classwise metrics
-        metric = self.metric_classwise
-        if metric is None:
-            return
-
-        self.model.validation_metric_classwise = torch.nn.ModuleDict().to(
-            self.model.device
-        )
-        for class_name in self.classes:
-            self.model.validation_metric_classwise[class_name] = metric.clone(
-                prefix=f"{class_name}/"
-            )
 
     @property
     def val_monitor(self):
-        """Quantity (and direction) to monitor
-
-        Useful for model checkpointing or early stopping.
-
-        Returns
-        -------
-        monitor : str
-            Name of quantity to monitor.
-        mode : {'min', 'max}
-            Minimize
-
-        See also
-        --------
-        pytorch_lightning.callbacks.ModelCheckpoint
-        pytorch_lightning.callbacks.EarlyStopping
-        """
-
         return "loss/val", "min"
