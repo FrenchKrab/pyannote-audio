@@ -435,17 +435,16 @@ class SegmentationTaskMixin:
         )  # in case there is a 0 seconds annotated region somewhere
         if np.sum(annotated_duration) == 0:
             yield None
-        prob_annotated_duration: np.ndarray = annotated_duration / np.sum(
-            annotated_duration
+        cum_prob_annotated_duration = np.cumsum(
+            annotated_duration / np.sum(annotated_duration)
         )
-
         duration = self.duration
 
         num_chunks_per_file = getattr(self, "num_chunks_per_file", 1)
 
         while True:
             # select one file at random (with probability proportional to its annotated duration)
-            file_id = np.random.choice(file_ids, p=prob_annotated_duration)
+            file_id = file_ids[cum_prob_annotated_duration.searchsorted(rng.random())]
 
             # generate `num_chunks_per_file` chunks from this file
             for _ in range(num_chunks_per_file):
@@ -455,14 +454,17 @@ class SegmentationTaskMixin:
                 )[0]
 
                 # turn annotated regions duration into a probability distribution
-                prob_annotated_regions_duration = self.annotated_regions["duration"][
-                    annotated_region_indices
-                ] / np.sum(self.annotated_regions["duration"][annotated_region_indices])
+                cum_prob_annotated_regions_duration = np.cumsum(
+                    self.annotated_regions["duration"][annotated_region_indices]
+                    / np.sum(
+                        self.annotated_regions["duration"][annotated_region_indices]
+                    )
+                )
 
                 # selected one annotated region at random (with probability proportional to its duration)
-                annotated_region_index = np.random.choice(
-                    annotated_region_indices, p=prob_annotated_regions_duration
-                )
+                annotated_region_index = annotated_region_indices[
+                    cum_prob_annotated_regions_duration.searchsorted(rng.random())
+                ]
 
                 # select one chunk at random in this annotated region
                 _, _, start, end = self.annotated_regions[annotated_region_index]
@@ -486,7 +488,7 @@ class SegmentationTaskMixin:
         """
 
         # create worker-specific random number generator
-        rng = create_rng_for_worker(self.model.current_epoch)
+        rng = create_rng_for_worker(self.model)
 
         balance = getattr(self, "balance", None)
         if balance is None:
