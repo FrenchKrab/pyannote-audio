@@ -197,7 +197,7 @@ class SegmentationTaskMixin:
                         f"Ignoring '{key}' metadata because of its type ({type(value)}). Only str and int are supported for now.",
                         category=UserWarning,
                     )
-            
+
             metadata.append(metadatum)
 
             database_unique_labels = list()
@@ -421,17 +421,23 @@ class SegmentationTaskMixin:
         # indices of training files that matches domain filters
         training = self.metadata["subset"] == Subsets.index("train")
         for key, value in filters.items():
-            training &= self.metadata[key] == self.metadata_unique_values[key].index(value)
+            training &= self.metadata[key] == self.metadata_unique_values[key].index(
+                value
+            )
         file_ids = np.where(training)[0]
-        if file_ids.sum() == 0:
+        if len(file_ids) == 0:
             yield None
 
         # turn annotated duration into a probability distribution
         annotated_duration = self.annotated_duration[file_ids]
-        annotated_duration = np.nan_to_num(annotated_duration, nan=0.0, copy=True)   # in case there is a 0 seconds annotated region somewhere
+        annotated_duration = np.nan_to_num(
+            annotated_duration, nan=0.0, copy=True
+        )  # in case there is a 0 seconds annotated region somewhere
         if np.sum(annotated_duration) == 0:
             yield None
-        prob_annotated_duration: np.ndarray = annotated_duration / np.sum(annotated_duration)
+        prob_annotated_duration: np.ndarray = annotated_duration / np.sum(
+            annotated_duration
+        )
 
         duration = self.duration
 
