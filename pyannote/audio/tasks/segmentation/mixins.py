@@ -425,10 +425,16 @@ class SegmentationTaskMixin:
                 value
             )
         file_ids = np.where(training)[0]
+        if len(file_ids) == 0:
+            yield None
 
         # turn annotated duration into a probability distribution
         annotated_duration = self.annotated_duration[file_ids]
-        cum_prob_annotated_duration = np.cumsum(
+        # in case there is a 0 seconds annotated region somewhere
+        annotated_duration = np.nan_to_num(annotated_duration, nan=0.0, copy=True)
+        if np.sum(annotated_duration) == 0:
+            yield None
+        cum_prob_annotated_duration: np.ndarray = np.cumsum(
             annotated_duration / np.sum(annotated_duration)
         )
 
@@ -498,7 +504,13 @@ class SegmentationTaskMixin:
                 # eg: for balance=["database", "split"], with 2 databases and 2 splits:
                 # ("DIHARD", "A"), ("DIHARD", "B"), ("REPERE", "A"), ("REPERE", "B")
                 filters = {key: value for key, value in zip(balance, product)}
-                subchunks[product] = self.train__iter__helper(rng, **filters)
+                product_iterator = self.train__iter__helper(rng, **filters)
+
+                # This specific product may not exist. For example, if balance=['database']
+                # and there is a database that's not present in the training set (only in the val).
+                # Or if a certain filter combination does not have any matching file.
+                if next(product_iterator) is not None:
+                    subchunks[product] = product_iterator
 
         # Compute the balance weights.
         # To get the weights of each subchunk generator,
