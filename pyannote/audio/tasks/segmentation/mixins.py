@@ -571,8 +571,9 @@ class SegmentationTaskMixin:
 
     def train__len__(self):
         # Number of training samples in one epoch
+        train_file_ids = np.where(self.metadata["subset"] == Subsets.index("train"))[0]
 
-        duration = np.sum(self.annotated_duration)
+        duration = np.sum(self.annotated_duration[train_file_ids])
         return max(self.batch_size, math.ceil(duration / self.duration))
 
     def val__getitem__(self, idx):
