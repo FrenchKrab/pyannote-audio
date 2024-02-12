@@ -25,12 +25,12 @@ import itertools
 from typing import Dict, List, Literal, Optional, Sequence, Text, Tuple, Union
 
 import numpy as np
-from pyannote.core import Segment, SlidingWindowFeature
-from pyannote.database import Protocol
 import torch
 import torch.nn.functional as F
+from pyannote.core import Segment, SlidingWindowFeature
+from pyannote.database import Protocol
 from torch_audiomentations.core.transforms_interface import BaseWaveformTransform
-from torchmetrics import ClasswiseWrapper, Metric
+from torchmetrics import Metric
 from torchmetrics.classification import (
     BinaryAccuracy,
     BinaryF1Score,
@@ -39,10 +39,10 @@ from torchmetrics.classification import (
 )
 
 from pyannote.audio.core.task import Problem, Resolution, Specifications, Task
-from pyannote.audio.tasks.segmentation.mixins import SegmentationTaskMixin
+from pyannote.audio.tasks.segmentation.mixins import SegmentationTask
 
 
-class MulticlassSegmentation(SegmentationTaskMixin, Task):
+class MulticlassSegmentation(SegmentationTask, Task):
     """Overlapped speech detection
 
     Overlapped speech detection is the task of detecting regions where at least
@@ -129,10 +129,12 @@ class MulticlassSegmentation(SegmentationTaskMixin, Task):
         if self.use_powerset:
             powersetclasses = ["nothing"]
             for simult_class_count in range(1, len(self.classes) + 1):
-                for combination in itertools.combinations(self.classes, simult_class_count):
+                for combination in itertools.combinations(
+                    self.classes, simult_class_count
+                ):
                     powersetclasses.append("+".join(combination))
             self.classes = powersetclasses
-            
+
             print(f"classes after powerset: {self.classes}")
 
     def setup(self):

@@ -66,9 +66,10 @@ def test_permutate_powerset():
 
             # then permutate the powerset class in powerset space AND the multilabel equivalent in its native space
             # and check it has the same result.
-            perm = torch.randperm(num_classes)
+            # perm = torch.randperm(num_classes)
+            perm = tuple(torch.randperm(num_classes).tolist())
             t1_ml_perm = t1_ml[:, perm]
-            perm_ps = powerset.permutation_powerset(perm)
+            perm_ps = powerset.permutation_mapping[perm]
             t1_ps_perm = t1[..., perm_ps]
             t1_ps_perm_ml = powerset.to_multilabel(t1_ps_perm)
 
