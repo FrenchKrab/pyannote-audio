@@ -295,9 +295,9 @@ class Inference(BaseInference):
         def __empty_list(**kwargs):
             return list()
 
-        outputs: Union[
-            List[np.ndarray], Tuple[List[np.ndarray]]
-        ] = map_with_specifications(self.model.specifications, __empty_list)
+        outputs: Union[List[np.ndarray], Tuple[List[np.ndarray]]] = (
+            map_with_specifications(self.model.specifications, __empty_list)
+        )
 
         if hook is not None:
             hook(completed=0, total=num_chunks + has_last_chunk)
@@ -387,9 +387,7 @@ class Inference(BaseInference):
             self.model.specifications, __aggregate, outputs, frames
         )
 
-    def __call__(
-        self, file: AudioFile, hook: Optional[Callable] = None
-    ) -> Union[
+    def __call__(self, file: AudioFile, hook: Optional[Callable] = None) -> Union[
         Tuple[Union[SlidingWindowFeature, np.ndarray]],
         Union[SlidingWindowFeature, np.ndarray],
     ]:
@@ -488,9 +486,9 @@ class Inference(BaseInference):
             waveform, sample_rate = self.model.audio.crop(
                 file, chunk, duration=duration
             )
-            outputs: Union[
-                SlidingWindowFeature, Tuple[SlidingWindowFeature]
-            ] = self.slide(waveform, sample_rate, hook=hook)
+            outputs: Union[SlidingWindowFeature, Tuple[SlidingWindowFeature]] = (
+                self.slide(waveform, sample_rate, hook=hook)
+            )
 
             def __shift(output: SlidingWindowFeature, **kwargs) -> SlidingWindowFeature:
                 frames = output.sliding_window
@@ -616,7 +614,7 @@ class Inference(BaseInference):
             # mask ~ (num_frames_per_chunk, num_classes)-shaped np.ndarray
             mask = 1 - np.isnan(score)
             np.nan_to_num(score, copy=False, nan=0.0)
-            
+
             start_frame = frames.closest_frame(chunk.start + 0.5 * frames.duration)
 
             aggregated_output[start_frame : start_frame + num_frames_per_chunk] += (
@@ -627,11 +625,11 @@ class Inference(BaseInference):
                 start_frame : start_frame + num_frames_per_chunk
             ] += (mask * hamming_window * warm_up_window)
 
-            aggregated_mask[
-                start_frame : start_frame + num_frames_per_chunk
-            ] = np.maximum(
-                aggregated_mask[start_frame : start_frame + num_frames_per_chunk],
-                mask,
+            aggregated_mask[start_frame : start_frame + num_frames_per_chunk] = (
+                np.maximum(
+                    aggregated_mask[start_frame : start_frame + num_frames_per_chunk],
+                    mask,
+                )
             )
 
         if skip_average:

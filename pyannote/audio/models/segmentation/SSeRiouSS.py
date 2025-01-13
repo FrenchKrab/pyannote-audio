@@ -127,7 +127,7 @@ class SSeRiouSS(Model):
             self.wav2vec_weights = nn.Parameter(
                 data=torch.ones(wav2vec_num_layers), requires_grad=True
             )
-        
+
         for param in self.wav2vec.parameters():
             param.requires_grad = not wav2vec_frozen
 

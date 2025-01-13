@@ -222,8 +222,8 @@ class Powerset(nn.Module):
         for multilabel_permutation in permutations(
             range(self.num_classes), self.num_classes
         ):
-            permutation_mapping[
-                tuple(multilabel_permutation)
-            ] = self._permutation_powerset(multilabel_permutation)
+            permutation_mapping[tuple(multilabel_permutation)] = (
+                self._permutation_powerset(multilabel_permutation)
+            )
 
         return permutation_mapping
