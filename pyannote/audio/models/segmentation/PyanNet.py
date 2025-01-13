@@ -21,7 +21,7 @@
 # SOFTWARE.
 
 from functools import lru_cache
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -46,9 +46,9 @@ class PyanNet(Model):
         Audio sample rate. Defaults to 16kHz (16000).
     num_channels : int, optional
         Number of channels. Defaults to mono (1).
-    sincnet : dict, optional
-        Keyword arugments passed to the SincNet block.
-        Defaults to {"stride": 1}.
+    sincnet : Union[dict, str], optional
+        Keyword arguments passed to the SincNet block. Or path to a pretrained SincNet model.
+        Defaults to {"stride": 10}.
     lstm : dict, optional
         Keyword arguments passed to the LSTM layer.
         Defaults to {"hidden_size": 128, "num_layers": 2, "bidirectional": True},
@@ -73,7 +73,7 @@ class PyanNet(Model):
 
     def __init__(
         self,
-        sincnet: Optional[dict] = None,
+        sincnet: Optional[Union[dict, str]] = None,
         lstm: Optional[dict] = None,
         linear: Optional[dict] = None,
         sample_rate: int = 16000,
@@ -82,14 +82,23 @@ class PyanNet(Model):
     ):
         super().__init__(sample_rate=sample_rate, num_channels=num_channels, task=task)
 
-        sincnet = merge_dict(self.SINCNET_DEFAULTS, sincnet)
-        sincnet["sample_rate"] = sample_rate
+        if isinstance(sincnet, str):
+            self.sincnet = torch.load(sincnet)
+            sincnet = merge_dict(
+                self.SINCNET_DEFAULTS,
+                {
+                    "stride": self.sincnet.stride,
+                    "sample_rate": self.sincnet.sample_rate,
+                },
+            )
+        else:
+            sincnet = merge_dict(self.SINCNET_DEFAULTS, sincnet)
+            sincnet["sample_rate"] = sample_rate
+            self.sincnet = SincNet(**sincnet)
         lstm = merge_dict(self.LSTM_DEFAULTS, lstm)
         lstm["batch_first"] = True
         linear = merge_dict(self.LINEAR_DEFAULTS, linear)
         self.save_hyperparameters("sincnet", "lstm", "linear")
-
-        self.sincnet = SincNet(**self.hparams.sincnet)
 
         monolithic = lstm["monolithic"]
         if monolithic:
@@ -110,9 +119,12 @@ class PyanNet(Model):
             self.lstm = nn.ModuleList(
                 [
                     nn.LSTM(
-                        60
-                        if i == 0
-                        else lstm["hidden_size"] * (2 if lstm["bidirectional"] else 1),
+                        (
+                            60
+                            if i == 0
+                            else lstm["hidden_size"]
+                            * (2 if lstm["bidirectional"] else 1)
+                        ),
                         **one_layer_lstm
                     )
                     for i in range(num_layers)
