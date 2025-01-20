@@ -98,6 +98,28 @@ class DiarizationErrorRate(Metric):
             self.speech_total,
         )
 
+    def compute_components(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Computes and returns all components of the DER.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+            tuple (false alarm, missed detection, confusion, DER)
+        """
+        der = _der_compute(
+            self.false_alarm,
+            self.missed_detection,
+            self.speaker_confusion,
+            self.speech_total,
+        )
+        return (
+            self.false_alarm / self.speech_total,
+            self.missed_detection / self.speech_total,
+            self.speaker_confusion / self.speech_total,
+            der,
+        )
 
 class SpeakerConfusionRate(DiarizationErrorRate):
     """Speaker confusion rate (one of the three summands of diarization error rate)
@@ -226,10 +248,11 @@ class OptimalDiarizationErrorRate(Metric):
     higher_is_better = False
     is_differentiable = False
 
+    
     def __init__(self, threshold: Optional[torch.Tensor] = None):
         super().__init__()
 
-        threshold = threshold or torch.linspace(0.0, 1.0, 51)
+        threshold = threshold if threshold is not None else torch.linspace(0.0, 1.0, 51)
         self.add_state("threshold", default=threshold, dist_reduce_fx="mean")
         (num_thresholds,) = threshold.shape
 
@@ -285,17 +308,46 @@ class OptimalDiarizationErrorRate(Metric):
         self.SpeakerConfusion += speaker_confusion
         self.speech_total += speech_total
 
-    def compute(self):
+    def compute(self, return_optimal_threshold_idx: bool = False):
         der = _der_compute(
             self.FalseAlarm,
             self.MissedDetection,
             self.SpeakerConfusion,
             self.speech_total,
         )
-        opt_der, _ = torch.min(der, dim=0)
+        opt_der, best_threshold_idx = torch.min(der, dim=0)
 
-        return opt_der
+        if return_optimal_threshold_idx:
+            return opt_der, best_threshold_idx.item()
+        else:
+            return opt_der
 
+    def compute_components(
+        self, return_optimal_threshold_idx: bool = False
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | tuple[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], int]:
+        """Computes and returns all components of the DER.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+            tuple (false alarm, missed detection, confusion, DER)
+        """
+        der, idx = self.compute(return_optimal_threshold_idx=True)
+
+        if return_optimal_threshold_idx:
+            return (
+                self.FalseAlarm[idx] / self.speech_total,
+                self.MissedDetection[idx] / self.speech_total,
+                self.SpeakerConfusion[idx] / self.speech_total,
+                der,
+            ), idx
+        else:
+            return (
+                self.FalseAlarm[idx] / self.speech_total,
+                self.MissedDetection[idx] / self.speech_total,
+                self.SpeakerConfusion[idx] / self.speech_total,
+                der,
+            )
 
 class OptimalDiarizationErrorRateThreshold(OptimalDiarizationErrorRate):
     higher_is_better = False
