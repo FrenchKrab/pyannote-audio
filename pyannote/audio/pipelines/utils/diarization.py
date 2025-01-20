@@ -20,6 +20,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+import sys
 from typing import Dict, Mapping, Optional, Tuple, Union
 
 import numpy as np
@@ -35,7 +36,7 @@ def set_num_speakers(
     num_speakers: Optional[int] = None,
     min_speakers: Optional[int] = None,
     max_speakers: Optional[int] = None,
-):
+) -> Tuple[Union[int, None], int, int]:
     """Validate number of speakers
 
     Parameters
@@ -56,7 +57,7 @@ def set_num_speakers(
 
     # override {min|max}_num_speakers by num_speakers when available
     min_speakers = num_speakers or min_speakers or 1
-    max_speakers = num_speakers or max_speakers or np.inf
+    max_speakers = num_speakers or max_speakers or sys.maxsize
 
     if min_speakers > max_speakers:
         raise ValueError(
