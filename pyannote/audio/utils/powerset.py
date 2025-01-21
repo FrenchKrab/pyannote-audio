@@ -98,7 +98,7 @@ class Powerset(nn.Module):
 
     def build_cardinality(self) -> torch.Tensor:
         """Compute size of each powerset class"""
-        return torch.sum(self.mapping, dim=1)
+        return torch.sum(self.mapping, dim=1).long()
 
     def to_multilabel(self, powerset: torch.Tensor, soft: bool = False) -> torch.Tensor:
         """Convert predictions from powerset to multi-label
@@ -154,6 +154,29 @@ class Powerset(nn.Module):
             torch.argmax(torch.matmul(multilabel, self.mapping.T), dim=-1),
             num_classes=self.num_powerset_classes,
         )
+
+    def get_speaker_counting_probabilities(
+        self, powerset: torch.Tensor
+    ) -> torch.Tensor:
+        """Get speaker counting probabilities from powerset
+
+        Parameters
+        ----------
+        powerset : (batch_size, num_frames, num_powerset_classes) torch.Tensor
+            Soft predictions in powerset space.
+
+        Returns
+        -------
+        speaker_counting : (batch_size, num_frames, max_set_size) torch.Tensor
+            Probabilities of having 0, 1, ..., max_set_size speakers.
+        """
+        result = torch.zeros(
+            powerset.shape[:-1] + (self.max_set_size + 1,), device=powerset.device
+        )
+        result.scatter_add_(
+            -1, self.cardinality[None, None].expand_as(powerset), powerset
+        )
+        return result
 
     def _permutation_powerset(
         self, multilabel_permutation: Tuple[int, ...]
@@ -222,8 +245,8 @@ class Powerset(nn.Module):
         for multilabel_permutation in permutations(
             range(self.num_classes), self.num_classes
         ):
-            permutation_mapping[tuple(multilabel_permutation)] = (
-                self._permutation_powerset(multilabel_permutation)
-            )
+            permutation_mapping[
+                tuple(multilabel_permutation)
+            ] = self._permutation_powerset(multilabel_permutation)
 
         return permutation_mapping
