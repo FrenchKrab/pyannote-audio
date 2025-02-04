@@ -30,11 +30,11 @@ from typing import Dict, Tuple
 
 import scipy.special
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from zayrunner.pyannote.audio.core.formulation import ProblemFormulationConverter
 
 
-class Powerset(nn.Module):
+class Powerset(ProblemFormulationConverter):
     """Powerset to multilabel conversion, and back.
 
     Parameters
@@ -53,11 +53,17 @@ class Powerset(nn.Module):
         self.register_buffer("mapping", self.build_mapping(), persistent=False)
         self.register_buffer("cardinality", self.build_cardinality(), persistent=False)
 
-    @cached_property
+    @property
     def num_powerset_classes(self) -> int:
-        # compute number of subsets of size at most "max_set_size"
-        # e.g. with num_classes = 3 and max_set_size = 2:
-        # {}, {0}, {1}, {2}, {0, 1}, {0, 2}, {1, 2}
+        return self.num_representation_classes
+
+    @cached_property
+    def num_representation_classes(self) -> int:
+        """compute number of subsets of size at most "max_set_size"
+        e.g. with num_classes = 3 and max_set_size = 2:
+        {}, {0}, {1}, {2}, {0, 1}, {0, 2}, {1, 2}
+        """
+
         return int(
             sum(
                 scipy.special.binom(self.num_classes, i)

@@ -105,6 +105,12 @@ class Specifications:
     # whether classes are permutation-invariant (e.g. diarization)
     permutation_invariant: bool = False
 
+    special_formulation: Optional[str] = None
+    """Special formulation of the task, defaults to None.
+    Currently only the following special formulations are supported:
+    - `hybrid_mlps`: Multilabel identities with class distribution of speaker count
+    """
+
     @cached_property
     def powerset(self) -> bool:
         if self.powerset_max_classes is None:

@@ -501,6 +501,59 @@ class SpeakerDiarization(SegmentationTask):
             "DiarizationErrorRate/DetectionErrorRate": DetectionErrorRate(0.5),
         }
 
+    def draw_validation(self, y: np.ndarray, y_pred: np.ndarray):
+        # prepare 3 x 3 grid (or smaller if batch size is smaller)
+        num_samples = min(self.batch_size, 9, y.shape[0])
+
+        nrows = math.ceil(math.sqrt(num_samples))
+        ncols = math.ceil(num_samples / nrows)
+        fig, axes = plt.subplots(
+            nrows=2 * nrows, ncols=ncols, figsize=(8, 5), squeeze=False
+        )
+
+        # reshape target so that there is one line per class when plotting it
+        y[y == 0] = np.nan
+        if len(y.shape) == 2:
+            y = y[:, :, np.newaxis]
+        y *= np.arange(y.shape[2])
+
+        # plot each sample
+        for sample_idx in range(num_samples):
+            # find where in the grid it should be plotted
+            row_idx = sample_idx // nrows
+            col_idx = sample_idx % ncols
+
+            # plot target
+            ax_ref = axes[row_idx * 2 + 0, col_idx]
+            sample_y = y[sample_idx]
+            ax_ref.plot(sample_y)
+            ax_ref.set_xlim(0, len(sample_y))
+            ax_ref.set_ylim(-1, sample_y.shape[1])
+            ax_ref.get_xaxis().set_visible(False)
+            ax_ref.get_yaxis().set_visible(False)
+
+            # plot predictions
+            ax_hyp = axes[row_idx * 2 + 1, col_idx]
+            sample_y_pred = y_pred[sample_idx]
+            ax_hyp.plot(sample_y_pred)
+            ax_hyp.set_ylim(-0.1, 1.1)
+            ax_hyp.set_xlim(0, len(sample_y))
+            ax_hyp.get_xaxis().set_visible(False)
+
+        plt.tight_layout()
+
+        for logger in self.model.loggers:
+            if isinstance(logger, TensorBoardLogger):
+                logger.experiment.add_figure("samples", fig, self.model.current_epoch)
+            elif isinstance(logger, MLFlowLogger):
+                logger.experiment.log_figure(
+                    run_id=logger.run_id,
+                    figure=fig,
+                    artifact_file=f"samples_epoch{self.model.current_epoch}.png",
+                )
+
+        plt.close(fig)
+
     # TODO: no need to compute gradient in this method
     def validation_step(self, batch, batch_idx: int):
         """Compute validation loss and metric
@@ -580,62 +633,9 @@ class SpeakerDiarization(SegmentationTask):
         ):
             return
 
-        # visualize first 9 validation samples of first batch in Tensorboard/MLflow
-
         y = permutated_target.float().cpu().numpy()
         y_pred = multilabel.cpu().numpy()
-
-        # prepare 3 x 3 grid (or smaller if batch size is smaller)
-        num_samples = min(self.batch_size, 9, y.shape[0])
-
-        nrows = math.ceil(math.sqrt(num_samples))
-        ncols = math.ceil(num_samples / nrows)
-        fig, axes = plt.subplots(
-            nrows=2 * nrows, ncols=ncols, figsize=(8, 5), squeeze=False
-        )
-
-        # reshape target so that there is one line per class when plotting it
-        y[y == 0] = np.nan
-        if len(y.shape) == 2:
-            y = y[:, :, np.newaxis]
-        y *= np.arange(y.shape[2])
-
-        # plot each sample
-        for sample_idx in range(num_samples):
-            # find where in the grid it should be plotted
-            row_idx = sample_idx // nrows
-            col_idx = sample_idx % ncols
-
-            # plot target
-            ax_ref = axes[row_idx * 2 + 0, col_idx]
-            sample_y = y[sample_idx]
-            ax_ref.plot(sample_y)
-            ax_ref.set_xlim(0, len(sample_y))
-            ax_ref.set_ylim(-1, sample_y.shape[1])
-            ax_ref.get_xaxis().set_visible(False)
-            ax_ref.get_yaxis().set_visible(False)
-
-            # plot predictions
-            ax_hyp = axes[row_idx * 2 + 1, col_idx]
-            sample_y_pred = y_pred[sample_idx]
-            ax_hyp.plot(sample_y_pred)
-            ax_hyp.set_ylim(-0.1, 1.1)
-            ax_hyp.set_xlim(0, len(sample_y))
-            ax_hyp.get_xaxis().set_visible(False)
-
-        plt.tight_layout()
-
-        for logger in self.model.loggers:
-            if isinstance(logger, TensorBoardLogger):
-                logger.experiment.add_figure("samples", fig, self.model.current_epoch)
-            elif isinstance(logger, MLFlowLogger):
-                logger.experiment.log_figure(
-                    run_id=logger.run_id,
-                    figure=fig,
-                    artifact_file=f"samples_epoch{self.model.current_epoch}.png",
-                )
-
-        plt.close(fig)
+        self.draw_validation(y, y_pred)
 
 
 def evaluate(protocol: str, subset: str = "test", model: str = "pyannote/segmentation"):
