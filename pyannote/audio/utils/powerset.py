@@ -137,6 +137,7 @@ class Powerset(ProblemFormulationConverter):
         """Alias for `to_multilabel`"""
         return self.to_multilabel(powerset, soft=soft)
 
+
     def to_powerset(self, multilabel: torch.Tensor) -> torch.Tensor:
         """Convert (hard) predictions from multi-label to powerset
 
@@ -160,6 +161,9 @@ class Powerset(ProblemFormulationConverter):
             torch.argmax(torch.matmul(multilabel, self.mapping.T), dim=-1),
             num_classes=self.num_powerset_classes,
         )
+    
+    def to_formulation(self, multilabel: torch.Tensor) -> torch.Tensor:
+        return self.to_powerset(multilabel) 
 
     def get_speaker_counting_probabilities(
         self, powerset: torch.Tensor
