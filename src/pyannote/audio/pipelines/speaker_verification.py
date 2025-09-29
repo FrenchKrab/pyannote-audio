@@ -23,7 +23,7 @@
 import warnings
 from functools import cached_property
 from pathlib import Path
-from typing import Optional, Text, Union
+from typing import Literal, Optional, Text, Union
 
 import numpy as np
 import torch
@@ -444,6 +444,8 @@ class ONNXWeSpeakerPretrainedSpeakerEmbedding(BaseInference):
 
         self.to(device or torch.device("cpu"))
 
+        self.mask_type: Literal["binary", "soft"] = "binary"
+
     def to(self, device: torch.device):
         if not isinstance(device, torch.device):
             raise TypeError(
@@ -602,12 +604,17 @@ class ONNXWeSpeakerPretrainedSpeakerEmbedding(BaseInference):
             masks.unsqueeze(dim=1), size=num_frames, mode="nearest"
         ).squeeze(dim=1)
 
-        imasks = imasks > 0.5
+        if self.mask_type == "binary":
+            imasks = imasks > 0.5
 
         embeddings = np.nan * np.zeros((batch_size, self.dimension))
 
         for f, (feature, imask) in enumerate(zip(features, imasks)):
-            masked_feature = feature[imask]
+            if self.mask_type == "binary":
+                masked_feature = feature[imask]
+            else:
+                masked_feature = feature * imask
+
             if masked_feature.shape[0] < self.min_num_frames:
                 continue
 

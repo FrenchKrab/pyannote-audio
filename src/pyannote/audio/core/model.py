@@ -110,7 +110,7 @@ class Model(lightning.LightningModule):
         pass
 
     @property
-    def specifications(self) -> Union[Specifications, Tuple[Specifications]]:
+    def specifications(self) -> Union[Specifications, Tuple[Specifications, ...]]:
         if self.task is None:
             try:
                 specifications = self._specifications
@@ -128,7 +128,7 @@ class Model(lightning.LightningModule):
 
     @specifications.setter
     def specifications(
-        self, specifications: Union[Specifications, Tuple[Specifications]]
+        self, specifications: Union[Specifications, Tuple[Specifications, ...]]
     ):
         if not isinstance(specifications, (Specifications, tuple)):
             raise ValueError(

@@ -105,6 +105,12 @@ class Specifications:
     # whether classes are permutation-invariant (e.g. diarization)
     permutation_invariant: bool = False
 
+    special_formulation: Optional[str] = None
+    """Special formulation of the task, defaults to None.
+    Currently only the following special formulations are supported:
+    - `hybrid_mlps`: Multilabel identities with class distribution of speaker count
+    """
+
     @cached_property
     def powerset(self) -> bool:
         if self.powerset_max_classes is None:
@@ -361,7 +367,9 @@ class Task(lightning.LightningDataModule):
         audio_regions_ids = list()  # start/end indices of annotated regions (per file)
 
         annotations = list()  # actual annotations
-        audio_segments_ids = list()  # start/end indices of annotated segments (per file)
+        audio_segments_ids = (
+            list()
+        )  # start/end indices of annotated segments (per file)
 
         unique_labels = list()
         database_unique_labels = {}
@@ -376,7 +384,6 @@ class Task(lightning.LightningDataModule):
 
         regions_id: int = 0
         segments_id: int = 0
-        
 
         for file_id, (subset, file) in enumerate(files_iter):
             # gather metadata and update metadata_unique_values so that each metadatum
@@ -668,6 +675,9 @@ class Task(lightning.LightningDataModule):
         try:
             with open(self.cache, "rb") as cache_file:
                 self.prepared_data = dict(np.load(cache_file, allow_pickle=True))
+                self.prepared_data["metadata-values"] = self.prepared_data[
+                    "metadata-values"
+                ].item()
         except FileNotFoundError:
             print(
                 "Cached data for protocol not found. Ensure that prepare_data() was called",
@@ -691,7 +701,7 @@ class Task(lightning.LightningDataModule):
         self.model.automatic_optimization = automatic_optimisation
 
     @property
-    def specifications(self) -> Union[Specifications, Tuple[Specifications]]:
+    def specifications(self) -> Union[Specifications, Tuple[Specifications, ...]]:
         # setup metadata on-demand the first time specifications are requested and missing
         if not hasattr(self, "_specifications"):
             raise UnknownSpecificationsError(
@@ -703,7 +713,7 @@ class Task(lightning.LightningDataModule):
 
     @specifications.setter
     def specifications(
-        self, specifications: Union[Specifications, Tuple[Specifications]]
+        self, specifications: Union[Specifications, Tuple[Specifications, ...]]
     ):
         self._specifications = specifications
 

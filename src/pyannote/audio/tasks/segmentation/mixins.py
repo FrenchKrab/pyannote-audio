@@ -166,8 +166,14 @@ class SegmentationTask(Task):
 
         # turn annotated duration into a probability distribution
         annotated_duration = self.prepared_data["audio-annotated"][file_ids]
+        annotated_duration_total = np.sum(annotated_duration)
+        # Exit early (this will discard this worker/helper).
+        # This should happen only when the filter contains no data.
+        # (which happens when balance is used since we use all combinations of balance filters)
+        if annotated_duration_total == 0:
+            yield None
         cum_prob_annotated_duration = np.cumsum(
-            annotated_duration / np.sum(annotated_duration)
+            annotated_duration / annotated_duration_total
         )
 
         duration = self.duration
